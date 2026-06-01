@@ -371,7 +371,6 @@ def save_payout_config_to_sheet(t_id, json_str):
     except: return False
 
 @st.cache_data(ttl=120, show_spinner=False)
-@st.cache_data(ttl=120, show_spinner=False)
 def get_raw_sheet_data(t_id):
     if not t_id: return pd.DataFrame()
     try:
@@ -385,6 +384,8 @@ def get_raw_sheet_data(t_id):
         df = df.rename(columns={
             'entry_id': 'Sheet_Row',
             'participant_name': 'Name',
+            'email': 'Email',                   # <-- NEW MAPPING
+            'payment_method': 'Payment Method', # <-- NEW MAPPING
             'tie_breaker': 'Tie Breaker',
             'paid': 'Paid'
         })
