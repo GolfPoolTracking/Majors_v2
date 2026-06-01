@@ -371,31 +371,32 @@ def save_payout_config_to_sheet(t_id, json_str):
     except: return False
 
 @st.cache_data(ttl=120, show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False)
 def get_raw_sheet_data(t_id):
     if not t_id: return pd.DataFrame()
     try:
-        res = get_supabase().table('entries').select('*').eq('tournament_id', str(t_id)).order('id').execute()
+        # 🔥 SHIFT TO HIGH-PERFORMANCE SQL VIEW
+        res = get_supabase().table('tournament_standings').select('*').eq('tournament_id', str(t_id)).order('entry_id').execute()
         if not res.data: return pd.DataFrame()
         
         df = pd.DataFrame(res.data)
-        # Structure mapping ensures downstream pandas operations do not break
+        
+        # Map the View structure directly to what the rest of your Streamlit app expects
         df = df.rename(columns={
-            'id': 'Sheet_Row',
-            'created_at': 'Timestamp',
-            'name': 'Name',
-            'email': 'Email',
-            'payment_method': 'Payment Method',
+            'entry_id': 'Sheet_Row',
+            'participant_name': 'Name',
             'tie_breaker': 'Tie Breaker',
-            'pick_1': 'Pick 1',
-            'pick_2': 'Pick 2',
-            'pick_3': 'Pick 3',
-            'pick_4': 'Pick 4',
-            'pick_5': 'Pick 5',
             'paid': 'Paid'
         })
+        
+        # Unpack the SQL Array back into Pick 1 -> Pick 5 for the Admin UI and Leaderboard logic
+        if 'picks' in df.columns:
+            for i in range(5):
+                df[f'Pick {i+1}'] = df['picks'].apply(lambda x: x[i] if isinstance(x, list) and len(x) > i else "")
+            
         return df.copy()
     except Exception as e:
-        st.session_state.setdefault("api_log", []).append(f"DB Read Error (entries): {e}")
+        st.session_state.setdefault("api_log", []).append(f"DB Read Error (tournament_standings view): {e}")
         return pd.DataFrame()
         
 def send_field_change_email(user_email, name, removed_picks, added_to_field, t_name, t_id, close_time_str, logo_url):
