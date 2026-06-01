@@ -214,15 +214,21 @@ def get_config(t_id, column, default=""):
         st.session_state.setdefault("api_log", []).append(f"DB Read Error ({column}): {e}")
         return default
 
-def update_config(t_id, column, value, t_name=""):
+def update_config(t_id, column, value, t_name=None):
     try:
         sb = get_supabase()
         existing = sb.table('tournament_configs').select('tournament_id').eq('tournament_id', str(t_id)).execute()
+        
+        update_data = {column: value}
+        # ONLY update the name if it is explicitly provided and not blank
+        if t_name and str(t_name).strip(): 
+            update_data['tournament_name'] = str(t_name).strip()
+            
         if existing.data:
-            # Add 'tournament_name' to the update dictionary to ensure it stays in sync
-            sb.table('tournament_configs').update({column: value, 'tournament_name': t_name}).eq('tournament_id', str(t_id)).execute()
+            sb.table('tournament_configs').update(update_data).eq('tournament_id', str(t_id)).execute()
         else:
-            sb.table('tournament_configs').insert({'tournament_id': str(t_id), 'tournament_name': t_name, column: value}).execute()
+            update_data['tournament_id'] = str(t_id)
+            sb.table('tournament_configs').insert(update_data).execute()
         return True
     except Exception as e:
         st.session_state.setdefault("api_log", []).append(f"DB Write Error ({column}): {e}")
@@ -242,7 +248,14 @@ def log_to_sheet(event_type, message):
         st.session_state.setdefault("api_log", []).append(f"DB Error (log_to_db): {e}")
 
 def save_api_backup_to_sheet(t_id, full_data):
-    return update_config(t_id, 'api_backup', full_data)
+    # Extract the official name straight from the RapidAPI payload
+    t_name = ""
+    try:
+        t_name = full_data.get('results', {}).get('tournament', {}).get('name', '')
+    except:
+        pass
+    
+    return update_config(t_id, 'api_backup', full_data, t_name=t_name)
 
 def fetch_api_backup_from_sheet(t_id):
     data = get_config(t_id, 'api_backup', {})
