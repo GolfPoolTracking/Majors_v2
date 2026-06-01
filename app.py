@@ -2264,8 +2264,9 @@ else:
             
             st.markdown("---")
             st.write("⏳ **Entries Close Time**")
-            default_close_dt = datetime.datetime.strptime(str(t_start), "%Y-%m-%d %H:%M:%S") if t_start else datetime.datetime.now()
-            current_close_dt = datetime.datetime.strptime(settings.get(f"close_time_{t_id}"), "%Y-%m-%d %H:%M:%S") if settings.get(f"close_time_{t_id}") else default_close_dt
+            default_close_dt = datetime.datetime.strptime(str(t_start), "%Y-%m-%d %H:%M:%S").replace(hour=5, minute=0, second=0) if t_start else datetime.datetime.now()
+            db_close_admin = fetch_close_time_from_db(t_id)
+            current_close_dt = datetime.datetime.strptime(db_close_admin, "%Y-%m-%d %H:%M:%S") if db_close_admin else default_close_dt
             
             c_d2, c_t2 = st.columns(2)
             with c_d2: close_d = st.date_input("Close Date", value=current_close_dt.date())
@@ -2273,7 +2274,8 @@ else:
             
             st.write("🔒 **Public Reveal Time**")
             default_reveal_dt = datetime.datetime.strptime(str(t_start), "%Y-%m-%d %H:%M:%S").replace(hour=5, minute=0, second=0) if t_start else datetime.datetime.now()
-            current_reveal_dt = datetime.datetime.strptime(settings.get(f"reveal_time_{t_id}"), "%Y-%m-%d %H:%M:%S") if settings.get(f"reveal_time_{t_id}") else default_reveal_dt
+            db_reveal_admin = fetch_reveal_time_from_db(t_id)
+            current_reveal_dt = datetime.datetime.strptime(db_reveal_admin, "%Y-%m-%d %H:%M:%S") if db_reveal_admin else default_reveal_dt
             
             c_d, c_t = st.columns(2)
             with c_d: reveal_d = st.date_input("Reveal Date", value=current_reveal_dt.date())
@@ -2309,8 +2311,18 @@ else:
             except Exception: pass
             
             if st.button("💾 Save Tournament Dates", type="primary", use_container_width=True):
-                settings[f"close_time_{t_id}"] = datetime.datetime.combine(close_d, close_t).strftime("%Y-%m-%d %H:%M:%S")
-                settings[f"reveal_time_{t_id}"] = datetime.datetime.combine(reveal_d, reveal_t).strftime("%Y-%m-%d %H:%M:%S")
+                close_str = datetime.datetime.combine(close_d, close_t).strftime("%Y-%m-%d %H:%M:%S")
+                reveal_str = datetime.datetime.combine(reveal_d, reveal_t).strftime("%Y-%m-%d %H:%M:%S")
+                
+                with st.spinner("Saving to database..."):
+                    # Write directly to Supabase so it survives a reboot/cache clear
+                    update_config(t_id, 'close_time', close_str)
+                    update_config(t_id, 'reveal_time', reveal_str)
+                    
+                    # Clear the specific caches so the UI updates immediately
+                    fetch_close_time_from_db.clear()
+                    fetch_reveal_time_from_db.clear()
+                    
                 st.success("✅ Dates saved securely! They will not change unless you click this again.")
             
             p_url = f"{BASE_URL}?view=public&tourney_id={t_id}"
