@@ -219,7 +219,8 @@ def update_config(t_id, column, value, t_name=""):
         sb = get_supabase()
         existing = sb.table('tournament_configs').select('tournament_id').eq('tournament_id', str(t_id)).execute()
         if existing.data:
-            sb.table('tournament_configs').update({column: value}).eq('tournament_id', str(t_id)).execute()
+            # Add 'tournament_name' to the update dictionary to ensure it stays in sync
+            sb.table('tournament_configs').update({column: value, 'tournament_name': t_name}).eq('tournament_id', str(t_id)).execute()
         else:
             sb.table('tournament_configs').insert({'tournament_id': str(t_id), 'tournament_name': t_name, column: value}).execute()
         return True
