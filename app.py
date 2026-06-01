@@ -262,6 +262,14 @@ def fetch_api_backup_from_sheet(t_id):
     return data if data else None
 
 @st.cache_data(ttl=300, show_spinner=False)
+def fetch_close_time_from_db(t_id):
+    return get_config(t_id, 'close_time', "")
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_reveal_time_from_db(t_id):
+    return get_config(t_id, 'reveal_time', "")
+
+@st.cache_data(ttl=300, show_spinner=False)
 def fetch_field_backup_from_sheet(t_id):
     return get_config(t_id, 'field_backup', "")
 
@@ -1642,12 +1650,17 @@ if is_public:
     """)
     
     t_start_dt = datetime.datetime.strptime(str(t_start), "%Y-%m-%d %H:%M:%S") if t_start else None
-    close_time = datetime.datetime.strptime(settings.get(f"close_time_{tid}"), "%Y-%m-%d %H:%M:%S") if settings.get(f"close_time_{tid}") else t_start_dt
-    reveal_time = datetime.datetime.strptime(settings.get(f"reveal_time_{tid}"), "%Y-%m-%d %H:%M:%S") if settings.get(f"reveal_time_{tid}") else (t_start_dt.replace(hour=5, minute=0, second=0) if t_start_dt else None)
     
-    close_time_str_email = "the tournament start"
-    close_time_str_ui = "the tournament start"
-    reveal_time_str_ui = "the tournament start"
+    # Set default times to 5:00 AM
+    default_close = t_start_dt.replace(hour=5, minute=0, second=0) if t_start_dt else None
+    default_reveal = t_start_dt.replace(hour=5, minute=0, second=0) if t_start_dt else None
+    
+    # Fetch from Supabase
+    db_close = fetch_close_time_from_db(tid)
+    db_reveal = fetch_reveal_time_from_db(tid)
+    
+    close_time = datetime.datetime.strptime(db_close, "%Y-%m-%d %H:%M:%S") if db_close else default_close
+    reveal_time = datetime.datetime.strptime(db_reveal, "%Y-%m-%d %H:%M:%S") if db_reveal else default_reveal
     
     try:
         uk_tz = pytz.timezone('Europe/London')
