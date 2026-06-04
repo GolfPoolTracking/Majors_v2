@@ -68,7 +68,7 @@ def _cached_safe_int_string(s_val):
     clean = re.sub(r"[^0-9.-]", "", s_val)
     if not clean or clean == '-': return 0
     try: return int(float(clean))
-    except: return 0
+    except (ValueError, TypeError): return 0
 
 def safe_int(val):
     if pd.isna(val): return 0
@@ -153,7 +153,7 @@ def format_tee_time(tt, tourney_tz_str, target_tz_str, round_date=None):
     try:
         dt_source = pytz.timezone(tourney_tz_str).localize(datetime.datetime.strptime(f"{round_date} {tt}", "%Y-%m-%d %H:%M"))
         return dt_source.astimezone(pytz.timezone(target_tz_str)).strftime('%H:%M')
-    except: return tt
+    except (ValueError, TypeError): return tt
 
 def get_pga_thru(p, curr_r, completed_rounds, is_live_scoring_active, tourney_tz_str, target_tz_str, hide_tt=False):
     stt = p.get('status', '').lower()
@@ -219,7 +219,7 @@ def get_config(t_id, column, default=""):
             return res.data[0].get(column) or default
         return default
     except Exception as e:
-        st.session_state.setdefault("api_log", []).append(f"DB Read Error in get_config ({column}, t_id {t_id}): {e}")
+        st.session_state.setdefault("api_log", []).append(f"DB Read Error in get_config ({column}, t_id {t_id}): {type(e).__name__} - {e}")
         return default
 
 def update_config(t_id, column, value, t_name=None):
@@ -238,7 +238,7 @@ def update_config(t_id, column, value, t_name=None):
             sb.table('tournament_configs').insert(update_data).execute()
         return True
     except Exception as e:
-        st.session_state.setdefault("api_log", []).append(f"DB Write Error in update_config ({column}, t_id {t_id}): {e}")
+        st.session_state.setdefault("api_log", []).append(f"DB Write Error in update_config ({column}, t_id {t_id}): {type(e).__name__} - {e}")
         return False
 
 def log_to_sheet(event_type, message):
@@ -252,13 +252,13 @@ def log_to_sheet(event_type, message):
             'message': message
         }).execute()
     except Exception as e: 
-        st.session_state.setdefault("api_log", []).append(f"DB Error in log_to_sheet: {e}")
+        st.session_state.setdefault("api_log", []).append(f"DB Error in log_to_sheet: {type(e).__name__} - {e}")
 
 def save_api_backup_to_sheet(t_id, full_data):
     t_name = ""
     try:
         t_name = full_data.get('results', {}).get('tournament', {}).get('name', '')
-    except: pass
+    except (KeyError, TypeError, AttributeError): pass
     return update_config(t_id, 'api_backup', full_data, t_name=t_name)
 
 def fetch_api_backup_from_sheet(t_id):
@@ -310,7 +310,7 @@ def save_fin_balances_to_sheet(t_id, json_str):
             fetch_fin_balances_from_sheet.clear()
             return True
         return False
-    except: return False
+    except json.JSONDecodeError: return False
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_alerted_field_from_sheet(t_id): return get_config(t_id, 'alerted_field', "")
@@ -324,7 +324,7 @@ def save_alerted_field_to_sheet(t_id, field_string):
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_par_from_sheet(t_id):
     try: return int(get_config(t_id, 'manual_par', 0))
-    except: return 0
+    except (ValueError, TypeError): return 0
 
 def save_par_to_sheet(t_id, par_value):
     if update_config(t_id, 'manual_par', par_value):
@@ -371,7 +371,7 @@ def save_payout_config_to_sheet(t_id, json_str):
             fetch_payout_config_from_sheet.clear()
             return True
         return False
-    except: return False
+    except json.JSONDecodeError: return False
 
 @st.cache_data(ttl=120, show_spinner=False)
 def get_raw_sheet_data(t_id):
@@ -401,12 +401,11 @@ def get_raw_sheet_data(t_id):
         else:
             for i in range(5): df[f'Pick {i+1}'] = ""
             
-        # 🚨 Fix: Drop backend Supabase view artifacts so they don't surface in Streamlit tables
         df = df.drop(columns=['picks', 'tournament_id'], errors='ignore')
             
         return df.copy()
     except Exception as e:
-        st.session_state.setdefault("api_log", []).append(f"DB Read Error in get_raw_sheet_data (tournament_standings view): {e}")
+        st.session_state.setdefault("api_log", []).append(f"DB Read Error in get_raw_sheet_data (tournament_standings view): {type(e).__name__} - {e}")
         return pd.DataFrame()
         
 def send_field_change_email(user_email, name, removed_picks, added_to_field, t_name, t_id, close_time_str, logo_url):
@@ -471,7 +470,7 @@ def send_field_change_email(user_email, name, removed_picks, added_to_field, t_n
         server.quit()
         return True
     except Exception as e: 
-        st.session_state.setdefault("api_log", []).append(f"Email Error in send_field_change_email: {e}")
+        st.session_state.setdefault("api_log", []).append(f"Email Error in send_field_change_email: {type(e).__name__} - {e}")
         return False
 
 def generate_short_link(long_url):
@@ -479,8 +478,8 @@ def generate_short_link(long_url):
         import urllib.parse
         resp = requests.get(f"https://is.gd/create.php?format=simple&url={urllib.parse.quote(long_url)}", timeout=5)
         if resp.status_code == 200 and "is.gd" in resp.text: return resp.text.strip()
-    except Exception as e: 
-        st.session_state.setdefault("api_log", []).append(f"URL Shortener Error in generate_short_link: {e}")
+    except requests.RequestException as e: 
+        st.session_state.setdefault("api_log", []).append(f"URL Shortener Error in generate_short_link: {type(e).__name__} - {e}")
     return None
 
 def send_confirmation_email(user_email, name, picks, tie_breaker, payment, t_name, t_id, is_edit=False, close_time_str="", logo_url=""):
@@ -541,7 +540,7 @@ def send_confirmation_email(user_email, name, picks, tie_breaker, payment, t_nam
         server.quit()
         return True
     except Exception as e: 
-        st.session_state.setdefault("api_log", []).append(f"Email Error in send_confirmation_email: {e}")
+        st.session_state.setdefault("api_log", []).append(f"Email Error in send_confirmation_email: {type(e).__name__} - {e}")
         return False
 
 def send_magic_link_email(user_email, t_name, t_id, logo_url=""):
@@ -592,7 +591,7 @@ def send_magic_link_email(user_email, t_name, t_id, logo_url=""):
         server.quit()
         return True
     except Exception as e: 
-        st.session_state.setdefault("api_log", []).append(f"Email Error in send_magic_link_email: {e}")
+        st.session_state.setdefault("api_log", []).append(f"Email Error in send_magic_link_email: {type(e).__name__} - {e}")
         return False
 
 def append_entry_to_sheet(t_id, entry_row):
@@ -614,7 +613,7 @@ def append_entry_to_sheet(t_id, entry_row):
         get_raw_sheet_data.clear() # Instantly update cache
         return True
     except Exception as e: 
-        st.session_state.setdefault("api_log", []).append(f"DB Error in append_entry_to_sheet ({t_id}): {e}")
+        st.session_state.setdefault("api_log", []).append(f"DB Error in append_entry_to_sheet ({t_id}): {type(e).__name__} - {e}")
         return False
 
 def update_single_cell_in_sheet(t_id, row_number, header_name, new_value):
@@ -634,7 +633,7 @@ def update_single_cell_in_sheet(t_id, row_number, header_name, new_value):
             return True
         return False
     except Exception as e:
-        st.session_state.setdefault("api_log", []).append(f"DB Error in update_single_cell_in_sheet (row {row_number}, t_id {t_id}): {e}")
+        st.session_state.setdefault("api_log", []).append(f"DB Error in update_single_cell_in_sheet (row {row_number}, t_id {t_id}): {type(e).__name__} - {e}")
         return False
 
 def update_specific_entry(t_id, row_index, entry_row):
@@ -654,7 +653,7 @@ def update_specific_entry(t_id, row_index, entry_row):
         get_raw_sheet_data.clear()
         return True
     except Exception as e: 
-        st.session_state.setdefault("api_log", []).append(f"DB Error in update_specific_entry (row {row_index}, t_id {t_id}): {e}")
+        st.session_state.setdefault("api_log", []).append(f"DB Error in update_specific_entry (row {row_index}, t_id {t_id}): {type(e).__name__} - {e}")
         return False
         
 def update_paid_status(t_id, row_index, is_paid):
@@ -663,7 +662,7 @@ def update_paid_status(t_id, row_index, is_paid):
         get_raw_sheet_data.clear()
         return True
     except Exception as e: 
-        st.session_state.setdefault("api_log", []).append(f"DB Error in update_paid_status (row {row_index}, t_id {t_id}): {e}")
+        st.session_state.setdefault("api_log", []).append(f"DB Error in update_paid_status (row {row_index}, t_id {t_id}): {type(e).__name__} - {e}")
         return False
 
 def send_admin_api_alert(url, error_details):
@@ -713,7 +712,7 @@ def send_admin_api_alert(url, error_details):
         settings["last_api_alert_time"] = now
         return True
     except Exception as e:
-        st.session_state.setdefault("api_log", []).append(f"Email Error in send_admin_api_alert: {e}")
+        st.session_state.setdefault("api_log", []).append(f"Email Error in send_admin_api_alert: {type(e).__name__} - {e}")
         return False
 
 def intelligent_api_call(url, trigger_reason="Unknown"):
@@ -739,8 +738,8 @@ def intelligent_api_call(url, trigger_reason="Unknown"):
                 return resp.json()
             else:
                 last_error = f"HTTP {resp.status_code}: {resp.text}"
-        except Exception as e: 
-            last_error = str(e)
+        except requests.RequestException as e: 
+            last_error = f"{type(e).__name__}: {str(e)}"
             continue
             
     log_to_sheet("API CRITICAL", f"All keys failed for {url}. Last Error: {last_error}")
@@ -864,14 +863,20 @@ def fetch_smart_leaderboard(selected_t_id):
             
             target_r = current_r if current_r > 0 else 1
             min_tt_str, max_tt_str = "23:59", "00:00"
+            min_tt_date, max_tt_date = None, None
             
             for p in lb_data:
                 for r in p.get('rounds', []):
                     if safe_int(r.get('round_number', 0)) == target_r:
                         tt = r.get('tee_time_local', '')
+                        r_date = r.get('date', '')
                         if tt and ':' in tt:
-                            if tt < min_tt_str: min_tt_str = tt
-                            if tt > max_tt_str: max_tt_str = tt
+                            if tt < min_tt_str: 
+                                min_tt_str = tt
+                                min_tt_date = r_date
+                            if tt > max_tt_str: 
+                                max_tt_str = tt
+                                max_tt_date = r_date
                             
             has_tee_times = (max_tt_str != "00:00" and min_tt_str != "23:59")
             
@@ -885,15 +890,23 @@ def fetch_smart_leaderboard(selected_t_id):
                 next_fetch = now + datetime.timedelta(minutes=240)
                 mode = "😴 Waiting for Tee Times (4h)"
             else:
-                min_tt_parts = min_tt_str.split(':')
-                max_tt_parts = max_tt_str.split(':')
-                
-                first_tt_dt = now_tourney.replace(hour=int(min_tt_parts[0]), minute=int(min_tt_parts[1]), second=0, microsecond=0)
-                last_tt_dt = now_tourney.replace(hour=int(max_tt_parts[0]), minute=int(max_tt_parts[1]), second=0, microsecond=0)
-                
-                if t_status == 'pre' and first_tt_dt < now_tourney:
-                    first_tt_dt += datetime.timedelta(days=1)
-                    last_tt_dt += datetime.timedelta(days=1)
+                if min_tt_date and max_tt_date:
+                    try:
+                        first_tt_dt = tourney_tz.localize(datetime.datetime.strptime(f"{min_tt_date} {min_tt_str}", "%Y-%m-%d %H:%M"))
+                        last_tt_dt = tourney_tz.localize(datetime.datetime.strptime(f"{max_tt_date} {max_tt_str}", "%Y-%m-%d %H:%M"))
+                    except (ValueError, TypeError):
+                        min_tt_parts = min_tt_str.split(':')
+                        max_tt_parts = max_tt_str.split(':')
+                        first_tt_dt = now_tourney.replace(hour=int(min_tt_parts[0]), minute=int(min_tt_parts[1]), second=0, microsecond=0)
+                        last_tt_dt = now_tourney.replace(hour=int(max_tt_parts[0]), minute=int(max_tt_parts[1]), second=0, microsecond=0)
+                else:
+                    min_tt_parts = min_tt_str.split(':')
+                    max_tt_parts = max_tt_str.split(':')
+                    first_tt_dt = now_tourney.replace(hour=int(min_tt_parts[0]), minute=int(min_tt_parts[1]), second=0, microsecond=0)
+                    last_tt_dt = now_tourney.replace(hour=int(max_tt_parts[0]), minute=int(max_tt_parts[1]), second=0, microsecond=0)
+                    if t_status == 'pre' and first_tt_dt < now_tourney:
+                        first_tt_dt += datetime.timedelta(days=1)
+                        last_tt_dt += datetime.timedelta(days=1)
 
                 first_check_dt = first_tt_dt + datetime.timedelta(minutes=30)
                 
@@ -925,7 +938,7 @@ def fetch_smart_leaderboard(selected_t_id):
                         mode = "🔥 R4 Live Scoring (5m)"
 
         except Exception as e:
-            log_to_sheet("TZ/TT ERROR", str(e))
+            log_to_sheet("TZ/TT ERROR", f"{type(e).__name__} - {str(e)}")
             next_fetch = now + datetime.timedelta(minutes=60)
             mode = "⛳ Active Play (Fallback 1h)"
         
@@ -1087,7 +1100,7 @@ def get_clean_entries(t_id, public_mode, valid_players=[], dns_players=[], email
             df = df.sort_values(by=['_sort_name'], ascending=[True]).drop(columns=['_sort_name'])
         df.index = range(1, len(df) + 1)
         return df, total_entries
-    except Exception as e: return pd.DataFrame(), 0
+    except Exception: return pd.DataFrame(), 0
 
 def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", valid_players=None, logo_url=None, is_admin_download=False, header_only=False, is_admin_view=False, hide_title=False, search_query=""):
     try:
@@ -1166,7 +1179,7 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
             final_status = 'wd' if name_lower in dns_list else norm_status
             
             try: strokes = [safe_int(rd.get('strokes', 0)) for rd in p.get('rounds', [])]
-            except: strokes = [0]*4
+            except (ValueError, TypeError): strokes = [0]*4
                 
             rds = {}
             if final_status not in ['wd', 'dq']:
@@ -1250,7 +1263,7 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
             if logo_url:
                 try:
                     st.markdown(f"<div style='text-align: center; padding-bottom: 10px;'><img src='{logo_url}' style='max-width: 250px; max-height: 150px; width: 100%; object-fit: contain;'></div>", unsafe_allow_html=True)
-                except: pass
+                except Exception: pass
             elif not hide_title:
                 st.header(f"🏆 {t_name.split('(')[0]}")
 
@@ -1517,7 +1530,7 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
         st.markdown(leaderboard_html, unsafe_allow_html=True)
         
     except Exception as e: 
-        st.error(f"Error calculating leaderboard: {e}")
+        st.error(f"Error calculating leaderboard: {type(e).__name__} - {e}")
         return pd.DataFrame() if is_admin_download else None
 
 def render_pga_leaderboard(lb_data, full_data, tourney_id, view_mode, par_override=0, hide_tt=False):
@@ -1629,7 +1642,7 @@ if is_public:
             settings[f"payout_2_{tid}"] = pconf.get("p2", 0)
             settings[f"payout_3_{tid}"] = pconf.get("p3", 0)
             settings[f"payout_pot_{tid}"] = pconf.get("pot", 0)
-    except: pass
+    except json.JSONDecodeError: pass
     
     lb_data, _, _, full_data, data_source = fetch_smart_leaderboard(tid)
     
@@ -1667,18 +1680,20 @@ if is_public:
     </script>
     """)
     
-    t_start_dt = datetime.datetime.strptime(str(t_start), "%Y-%m-%d %H:%M:%S") if t_start else None
+    try: t_start_dt = datetime.datetime.strptime(str(t_start), "%Y-%m-%d %H:%M:%S") if t_start else None
+    except (ValueError, TypeError): t_start_dt = None
     
-    # Set default times to 5:00 AM
     default_close = t_start_dt.replace(hour=5, minute=0, second=0) if t_start_dt else None
     default_reveal = t_start_dt.replace(hour=5, minute=0, second=0) if t_start_dt else None
     
-    # Fetch from Supabase
     db_close = fetch_close_time_from_db(tid)
     db_reveal = fetch_reveal_time_from_db(tid)
     
-    close_time = datetime.datetime.strptime(db_close, "%Y-%m-%d %H:%M:%S") if db_close else default_close
-    reveal_time = datetime.datetime.strptime(db_reveal, "%Y-%m-%d %H:%M:%S") if db_reveal else default_reveal
+    try: close_time = datetime.datetime.strptime(db_close, "%Y-%m-%d %H:%M:%S") if db_close else default_close
+    except (ValueError, TypeError): close_time = default_close
+    
+    try: reveal_time = datetime.datetime.strptime(db_reveal, "%Y-%m-%d %H:%M:%S") if db_reveal else default_reveal
+    except (ValueError, TypeError): reveal_time = default_reveal
     
     try:
         uk_tz = pytz.timezone('Europe/London')
@@ -1693,7 +1708,7 @@ if is_public:
             rt_uk = uk_tz.localize(reveal_time)
             rt_et = rt_uk.astimezone(et_tz)
             reveal_time_str_ui = f"{rt_uk.strftime('%a, %b %d at %I:%M %p')} UK / {rt_et.strftime('%a, %b %d at %I:%M %p')} ET"
-    except:
+    except Exception:
         if close_time: 
             close_time_str_email = close_time.strftime('%a, %b %d at %I:%M %p')
             close_time_str_ui = close_time_str_email
@@ -1716,7 +1731,7 @@ if is_public:
         try:
             st.markdown(f"<div style='text-align: center; padding-bottom: 10px;'><img src='{public_logo}' style='max-width: 250px; max-height: 150px; width: 100%; object-fit: contain;'></div>", unsafe_allow_html=True)
             logo_rendered = True
-        except: pass 
+        except Exception: pass 
             
     if not logo_rendered:
         st.markdown(f"<h1 style='text-align: center; padding-bottom: 10px;'>🏆 {tnm.split('(')[0]}</h1>", unsafe_allow_html=True)
@@ -1784,7 +1799,7 @@ if is_public:
             else:
                 st.error("🚨 This secure edit link has expired, been used, or is invalid. Please request a new one.")
         except Exception as e:
-            st.session_state.setdefault("api_log", []).append(f"Magic Link Error UI (token {magic_token}): {e}")
+            st.session_state.setdefault("api_log", []).append(f"Magic Link Error UI (token {magic_token}): {type(e).__name__} - {e}")
 
     current_tab = 0
     
@@ -2215,7 +2230,7 @@ else:
                     settings[f"payout_2_{t_id}"] = pconf.get("p2", 0)
                     settings[f"payout_3_{t_id}"] = pconf.get("p3", 0)
                     settings[f"payout_pot_{t_id}"] = pconf.get("pot", 0)
-            except: pass
+            except json.JSONDecodeError: pass
             
             st.subheader("🖼️ Branding")
             current_logo = fetch_logo_from_sheet(t_id)
@@ -2283,7 +2298,8 @@ else:
             st.write("⏳ **Entries Close Time**")
             default_close_dt = datetime.datetime.strptime(str(t_start), "%Y-%m-%d %H:%M:%S").replace(hour=5, minute=0, second=0) if t_start else datetime.datetime.now()
             db_close_admin = fetch_close_time_from_db(t_id)
-            current_close_dt = datetime.datetime.strptime(db_close_admin, "%Y-%m-%d %H:%M:%S") if db_close_admin else default_close_dt
+            try: current_close_dt = datetime.datetime.strptime(db_close_admin, "%Y-%m-%d %H:%M:%S") if db_close_admin else default_close_dt
+            except (ValueError, TypeError): current_close_dt = default_close_dt
             
             c_d2, c_t2 = st.columns(2)
             with c_d2: close_d = st.date_input("Close Date", value=current_close_dt.date())
@@ -2292,7 +2308,8 @@ else:
             st.write("🔒 **Public Reveal Time**")
             default_reveal_dt = datetime.datetime.strptime(str(t_start), "%Y-%m-%d %H:%M:%S").replace(hour=5, minute=0, second=0) if t_start else datetime.datetime.now()
             db_reveal_admin = fetch_reveal_time_from_db(t_id)
-            current_reveal_dt = datetime.datetime.strptime(db_reveal_admin, "%Y-%m-%d %H:%M:%S") if db_reveal_admin else default_reveal_dt
+            try: current_reveal_dt = datetime.datetime.strptime(db_reveal_admin, "%Y-%m-%d %H:%M:%S") if db_reveal_admin else default_reveal_dt
+            except (ValueError, TypeError): current_reveal_dt = default_reveal_dt
             
             c_d, c_t = st.columns(2)
             with c_d: reveal_d = st.date_input("Reveal Date", value=current_reveal_dt.date())
@@ -2382,7 +2399,7 @@ else:
             try:
                 st.markdown(f"<div style='text-align: center; padding-bottom: 10px;'><img src='{admin_logo}' style='max-width: 250px; max-height: 150px; width: 100%; object-fit: contain;'></div>", unsafe_allow_html=True)
                 logo_rendered = True
-            except: pass 
+            except Exception: pass 
 
         if not logo_rendered:
             st.markdown(f"<h1 style='text-align: center; padding-bottom: 10px;'>🏆 {t_name_display}</h1>", unsafe_allow_html=True)
@@ -2532,7 +2549,7 @@ else:
                 
                 saved_bals_str = fetch_fin_balances_from_sheet(t_id)
                 try: saved_bals = json.loads(saved_bals_str)
-                except: saved_bals = {}
+                except json.JSONDecodeError: saved_bals = {}
 
                 col_z, col_p, col_r = st.columns(3)
                 with col_z:
@@ -2660,7 +2677,7 @@ else:
                     res = get_supabase().table('app_logs').select('*').eq('tournament_id', str(t_id)).order('created_at', desc=True).limit(50).execute()
                     if res.data: st.dataframe(pd.DataFrame(res.data), width="stretch", hide_index=True)
                     else: st.info("Log table is empty.")
-                except Exception as e: st.error(f"Could not load logs: {e}")
+                except Exception as e: st.error(f"Could not load logs: {type(e).__name__} - {e}")
                     
         with t7:
             st.subheader("💻 Raw API JSON")
@@ -2710,12 +2727,14 @@ else:
                         
                         if st.button("🚀 Send Alert Emails", type="primary"):
                             with st.spinner("Sending emails..."):
-                                current_close_dt = datetime.datetime.strptime(settings.get(f"close_time_{t_id}"), "%Y-%m-%d %H:%M:%S") if settings.get(f"close_time_{t_id}") else datetime.datetime.now()
+                                try: current_close_dt = datetime.datetime.strptime(settings.get(f"close_time_{t_id}"), "%Y-%m-%d %H:%M:%S") if settings.get(f"close_time_{t_id}") else datetime.datetime.now()
+                                except (ValueError, TypeError): current_close_dt = datetime.datetime.now()
+                                
                                 try:
                                     uk_tz = pytz.timezone('Europe/London'); et_tz = pytz.timezone('America/New_York')
                                     ct_uk = uk_tz.localize(current_close_dt); ct_et = ct_uk.astimezone(et_tz)
                                     close_time_str_admin = f"{ct_uk.strftime('%a, %b %d at %I:%M %p')} UK / {ct_et.strftime('%a, %b %d at %I:%M %p')} ET"
-                                except: close_time_str_admin = current_close_dt.strftime('%a, %b %d at %I:%M %p')
+                                except Exception: close_time_str_admin = current_close_dt.strftime('%a, %b %d at %I:%M %p')
                                 
                                 emails_sent = 0
                                 alerted_emails = set()
