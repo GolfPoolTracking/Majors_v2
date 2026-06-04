@@ -1,4 +1,4 @@
-import streamlit as st, pandas as pd, requests, re, datetime, smtplib, pytz, json, hashlib, altair as alt, time
+import streamlit as st, pandas as pd, requests, re, datetime, smtplib, pytz, json, hashlib, altair as alt, time, secrets, html
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.utils import formataddr
@@ -43,7 +43,6 @@ target_tourney_id = st.query_params.get("tourney_id")
 
 if "admin_password" in st.secrets:
     ADMIN_PASSWORD = st.secrets["admin_password"]
-    MAGIC_LINK_SECRET = st.secrets.get("magic_link_secret", ADMIN_PASSWORD)
 else:
     if not is_public:
         st.error("🚨 Configuration Error: `admin_password` is missing from Streamlit Secrets.")
@@ -113,7 +112,7 @@ def get_pga_round_score_num(p, r_idx, max_visible_round=4, par_override=0, is_li
 
 def format_pga_round_score(p, r_idx, max_visible_round, par_override, is_live_scoring_active, curr_r):
     target_r = r_idx + 1
-    score = get_pga_round_score_num(p, r_idx, max_visible_round, par_override, is_live_scoring_active, curr_r)
+    score = get_pga_round_score_num(p=p, r_idx=r_idx, max_visible_round=max_visible_round, par_override=par_override, is_live_scoring_active=is_live_scoring_active, curr_r=curr_r)
     if score == 999: return "-"
     txt = "E" if score == 0 else f"+{score}" if score > 0 else str(score)
     stt = p.get('status', '').lower()
@@ -133,17 +132,28 @@ def get_pga_total_num(p, max_visible_round, par_override, is_live_scoring_active
     is_playing_now = stt == 'active' and has_started
     if is_live_scoring_active and is_playing_now and max_visible_round == curr_r:
         if par_override > 0:
-            past_score = sum([get_pga_round_score_num(p, i, curr_r - 1, par_override) for i in range(curr_r - 1) if get_pga_round_score_num(p, i, curr_r - 1, par_override) != 999])
+            past_score = 0
+            for i in range(curr_r - 1):
+                s = get_pga_round_score_num(p=p, r_idx=i, max_visible_round=curr_r - 1, par_override=par_override, is_live_scoring_active=is_live_scoring_active, curr_r=curr_r)
+                if s != 999: past_score += s
             return past_score + (api_total - api_past)
         return api_total
     locked_score = 0
     has_completed_round = False
     for r_idx in range(max_visible_round):
-        rs = get_pga_round_score_num(p, r_idx, max_visible_round, par_override, is_live_scoring_active, curr_r)
+        rs = get_pga_round_score_num(p=p, r_idx=r_idx, max_visible_round=max_visible_round, par_override=par_override, is_live_scoring_active=is_live_scoring_active, curr_r=curr_r)
         if rs != 999:
             locked_score += rs
             has_completed_round = True
     return locked_score if has_completed_round else 999
+
+def format_tee_time(tt, tourney_tz_str, target_tz_str, round_date=None):
+    if not tt or ':' not in tt or tt == "00:00": return tt
+    if not round_date: return tt 
+    try:
+        dt_source = pytz.timezone(tourney_tz_str).localize(datetime.datetime.strptime(f"{round_date} {tt}", "%Y-%m-%d %H:%M"))
+        return dt_source.astimezone(pytz.timezone(target_tz_str)).strftime('%H:%M')
+    except: return tt
 
 def get_pga_thru(p, curr_r, completed_rounds, is_live_scoring_active, tourney_tz_str, target_tz_str, hide_tt=False):
     stt = p.get('status', '').lower()
@@ -163,11 +173,9 @@ def get_pga_thru(p, curr_r, completed_rounds, is_live_scoring_active, tourney_tz
     for rd in p.get('rounds', []):
         if safe_int(rd.get('round_number', 0)) == target_r:
             tt = rd.get('tee_time_local', '')
-            if tt and ':' in tt and tt != "00:00":
-                try:
-                    dt_source = pytz.timezone(tourney_tz_str).localize(datetime.datetime.now().replace(hour=int(tt.split(':')[0]), minute=int(tt.split(':')[1]), second=0, microsecond=0))
-                    return dt_source.astimezone(pytz.timezone(target_tz_str)).strftime('%H:%M')
-                except: return tt
+            r_date = rd.get('date')
+            return format_tee_time(tt, tourney_tz_str, target_tz_str, r_date)
+            
     if stt == 'active': return "Waiting for tee times..."
     return "-"
 
@@ -211,7 +219,7 @@ def get_config(t_id, column, default=""):
             return res.data[0].get(column) or default
         return default
     except Exception as e:
-        st.session_state.setdefault("api_log", []).append(f"DB Read Error ({column}): {e}")
+        st.session_state.setdefault("api_log", []).append(f"DB Read Error in get_config ({column}, t_id {t_id}): {e}")
         return default
 
 def update_config(t_id, column, value, t_name=None):
@@ -220,7 +228,6 @@ def update_config(t_id, column, value, t_name=None):
         existing = sb.table('tournament_configs').select('tournament_id').eq('tournament_id', str(t_id)).execute()
         
         update_data = {column: value}
-        # ONLY update the name if it is explicitly provided and not blank
         if t_name and str(t_name).strip(): 
             update_data['tournament_name'] = str(t_name).strip()
             
@@ -231,7 +238,7 @@ def update_config(t_id, column, value, t_name=None):
             sb.table('tournament_configs').insert(update_data).execute()
         return True
     except Exception as e:
-        st.session_state.setdefault("api_log", []).append(f"DB Write Error ({column}): {e}")
+        st.session_state.setdefault("api_log", []).append(f"DB Write Error in update_config ({column}, t_id {t_id}): {e}")
         return False
 
 def log_to_sheet(event_type, message):
@@ -245,16 +252,13 @@ def log_to_sheet(event_type, message):
             'message': message
         }).execute()
     except Exception as e: 
-        st.session_state.setdefault("api_log", []).append(f"DB Error (log_to_db): {e}")
+        st.session_state.setdefault("api_log", []).append(f"DB Error in log_to_sheet: {e}")
 
 def save_api_backup_to_sheet(t_id, full_data):
-    # Extract the official name straight from the RapidAPI payload
     t_name = ""
     try:
         t_name = full_data.get('results', {}).get('tournament', {}).get('name', '')
-    except:
-        pass
-    
+    except: pass
     return update_config(t_id, 'api_backup', full_data, t_name=t_name)
 
 def fetch_api_backup_from_sheet(t_id):
@@ -262,16 +266,13 @@ def fetch_api_backup_from_sheet(t_id):
     return data if data else None
 
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_close_time_from_db(t_id):
-    return get_config(t_id, 'close_time', "")
+def fetch_close_time_from_db(t_id): return get_config(t_id, 'close_time', "")
 
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_reveal_time_from_db(t_id):
-    return get_config(t_id, 'reveal_time', "")
+def fetch_reveal_time_from_db(t_id): return get_config(t_id, 'reveal_time', "")
 
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_field_backup_from_sheet(t_id):
-    return get_config(t_id, 'field_backup', "")
+def fetch_field_backup_from_sheet(t_id): return get_config(t_id, 'field_backup', "")
 
 def save_field_backup_to_sheet(t_id, field_string):
     if update_config(t_id, 'field_backup', field_string):
@@ -280,8 +281,7 @@ def save_field_backup_to_sheet(t_id, field_string):
     return False
 
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_dns_from_sheet(t_id):
-    return get_config(t_id, 'dns_list', "")
+def fetch_dns_from_sheet(t_id): return get_config(t_id, 'dns_list', "")
 
 def save_dns_to_sheet(t_id, dns_string):
     if update_config(t_id, 'dns_list', dns_string):
@@ -290,8 +290,7 @@ def save_dns_to_sheet(t_id, dns_string):
     return False
 
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_short_url_from_sheet(t_id):
-    return get_config(t_id, 'short_url', "")
+def fetch_short_url_from_sheet(t_id): return get_config(t_id, 'short_url', "")
 
 def save_short_url_to_sheet(t_id, short_url):
     if update_config(t_id, 'short_url', short_url):
@@ -314,8 +313,7 @@ def save_fin_balances_to_sheet(t_id, json_str):
     except: return False
 
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_alerted_field_from_sheet(t_id):
-    return get_config(t_id, 'alerted_field', "")
+def fetch_alerted_field_from_sheet(t_id): return get_config(t_id, 'alerted_field', "")
 
 def save_alerted_field_to_sheet(t_id, field_string):
     if update_config(t_id, 'alerted_field', field_string):
@@ -335,8 +333,7 @@ def save_par_to_sheet(t_id, par_value):
     return False
 
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_logo_from_sheet(t_id):
-    return get_config(t_id, 'logo_url', "")
+def fetch_logo_from_sheet(t_id): return get_config(t_id, 'logo_url', "")
 
 def save_logo_to_sheet(t_id, logo_url):
     if update_config(t_id, 'logo_url', logo_url):
@@ -345,8 +342,7 @@ def save_logo_to_sheet(t_id, logo_url):
     return False
 
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_aliases_from_sheet(t_id):
-    return get_config(t_id, 'name_aliases', "")
+def fetch_aliases_from_sheet(t_id): return get_config(t_id, 'name_aliases', "")
 
 def save_aliases_to_sheet(t_id, alias_string):
     if update_config(t_id, 'name_aliases', alias_string):
@@ -355,8 +351,7 @@ def save_aliases_to_sheet(t_id, alias_string):
     return False
 
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_hide_tt_from_sheet(t_id):
-    return get_config(t_id, 'hide_tee_times', False)
+def fetch_hide_tt_from_sheet(t_id): return get_config(t_id, 'hide_tee_times', False)
 
 def save_hide_tt_to_sheet(t_id, hide_tt_bool):
     if update_config(t_id, 'hide_tee_times', hide_tt_bool):
@@ -382,60 +377,66 @@ def save_payout_config_to_sheet(t_id, json_str):
 def get_raw_sheet_data(t_id):
     if not t_id: return pd.DataFrame()
     try:
-        # 🔥 SHIFT TO HIGH-PERFORMANCE SQL VIEW
         res = get_supabase().table('tournament_standings').select('*').eq('tournament_id', str(t_id)).order('entry_id').execute()
         if not res.data: return pd.DataFrame()
         
         df = pd.DataFrame(res.data)
         
-        # Map the View structure directly to what the rest of your Streamlit app expects
+        if 'entry_id' not in df.columns or 'participant_name' not in df.columns:
+            st.session_state.setdefault("api_log", []).append(f"DB Error in get_raw_sheet_data ({t_id}): Missing 'entry_id' or 'participant_name'. Columns: {df.columns.tolist()}")
+            return pd.DataFrame()
+        
         df = df.rename(columns={
             'entry_id': 'Sheet_Row',
             'participant_name': 'Name',
-            'email': 'Email',                   # <-- NEW MAPPING
-            'payment_method': 'Payment Method', # <-- NEW MAPPING
+            'email': 'Email',                   
+            'payment_method': 'Payment Method', 
             'tie_breaker': 'Tie Breaker',
             'paid': 'Paid'
         })
         
-        # Unpack the SQL Array back into Pick 1 -> Pick 5 for the Admin UI and Leaderboard logic
         if 'picks' in df.columns:
             for i in range(5):
                 df[f'Pick {i+1}'] = df['picks'].apply(lambda x: x[i] if isinstance(x, list) and len(x) > i else "")
+        else:
+            for i in range(5): df[f'Pick {i+1}'] = ""
             
         return df.copy()
     except Exception as e:
-        st.session_state.setdefault("api_log", []).append(f"DB Read Error (tournament_standings view): {e}")
+        st.session_state.setdefault("api_log", []).append(f"DB Read Error in get_raw_sheet_data (tournament_standings view): {e}")
         return pd.DataFrame()
         
 def send_field_change_email(user_email, name, removed_picks, added_to_field, t_name, t_id, close_time_str, logo_url):
     sender, pwd = st.secrets.get("email_sender"), st.secrets.get("email_password")
     if not sender or not pwd: return False
     try:
+        safe_name = html.escape(str(name))
+        safe_tname = html.escape(str(t_name))
+        
         msg = MIMEMultipart()
-        msg['From'] = formataddr((t_name, sender))
+        msg['From'] = formataddr((safe_tname, sender))
         msg['To'] = user_email
         
-        logo_html = f'<div style="text-align: center; margin-bottom: 20px;"><img src="{logo_url}" style="max-height: 85px; max-width: 100%;" alt="{t_name} Logo"></div>' if logo_url else f'<div style="text-align: center; border-bottom: 2px solid #2ecc71; padding-bottom: 10px; margin-bottom: 20px;"><h2 style="color: #27ae60; margin: 0;">{t_name} Sweepstakes</h2></div>'
+        logo_html = f'<div style="text-align: center; margin-bottom: 20px;"><img src="{logo_url}" style="max-height: 85px; max-width: 100%;" alt="{safe_tname} Logo"></div>' if logo_url else f'<div style="text-align: center; border-bottom: 2px solid #2ecc71; padding-bottom: 10px; margin-bottom: 20px;"><h2 style="color: #27ae60; margin: 0;">{safe_tname} Sweepstakes</h2></div>'
         public_link = f"{BASE_URL}?view=public&tourney_id={t_id}"
         
         blocks = []
-        subject = f"{t_name} - ⚠️ Tournament Field Update"
+        subject = f"{safe_tname} - ⚠️ Tournament Field Update"
         
         if removed_picks:
-            subject = f"{t_name} - 🚨 URGENT: Action Required for your Team"
-            p_html = "".join([f"<li style='padding: 4px 0;'><b>{p}</b></li>" for p in removed_picks])
+            subject = f"{safe_tname} - 🚨 URGENT: Action Required for your Team"
+            p_html = "".join([f"<li style='padding: 4px 0;'><b>{html.escape(p)}</b></li>" for p in removed_picks])
             blocks.append(f"""
             <div style="background-color: #fff3e0; border-left: 4px solid #e67e22; padding: 15px 20px; border-radius: 4px; margin: 20px 0;">
                 <h3 style="margin-top:0; color: #d35400; font-size: 18px;">🚨 Player(s) Withdrawn</h3>
                 <p style="font-size: 15px;">One or more players you selected are no longer in the tournament field:</p>
                 <ul style="font-size: 15px; color: #c0392b;">{p_html}</ul>
-                <p style="font-size: 15px; font-weight: bold;">Please go to the Tournament Dashboard to update your entry before the deadline: <br><span style="color:#d35400;">{close_time_str}</span>.</p>
+                <p style="font-size: 15px; font-weight: bold;">Please go to the Tournament Dashboard to update your entry before the deadline: <br><span style="color:#d35400;">{html.escape(str(close_time_str))}</span>.</p>
             </div>
             """)
             
         if added_to_field:
-            p_html = "".join([f"<li>{p}</li>" for p in added_to_field])
+            p_html = "".join([f"<li>{html.escape(p)}</li>" for p in added_to_field])
             blocks.append(f"""
             <div style="background-color: #e8f8f5; border-left: 4px solid #1abc9c; padding: 15px 20px; border-radius: 4px; margin: 20px 0;">
                 <h3 style="margin-top:0; color: #16a085; font-size: 18px;">⛳ New Players Added</h3>
@@ -448,7 +449,7 @@ def send_field_change_email(user_email, name, removed_picks, added_to_field, t_n
         <html>
           <body style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #2c3e50; line-height: 1.6; max-width: 600px; margin: 0 auto; padding: 20px;">
             {logo_html}
-            <p style="font-size: 16px;">Hi <b>{name}</b>,</p>
+            <p style="font-size: 16px;">Hi <b>{safe_name}</b>,</p>
             {"".join(blocks)}
             
             <div style="text-align: center; margin-top: 35px; margin-bottom: 20px;">
@@ -467,7 +468,7 @@ def send_field_change_email(user_email, name, removed_picks, added_to_field, t_n
         server.quit()
         return True
     except Exception as e: 
-        st.session_state.setdefault("api_log", []).append(f"Email Error (send_field_change): {e}")
+        st.session_state.setdefault("api_log", []).append(f"Email Error in send_field_change_email: {e}")
         return False
 
 def generate_short_link(long_url):
@@ -476,31 +477,36 @@ def generate_short_link(long_url):
         resp = requests.get(f"https://is.gd/create.php?format=simple&url={urllib.parse.quote(long_url)}", timeout=5)
         if resp.status_code == 200 and "is.gd" in resp.text: return resp.text.strip()
     except Exception as e: 
-        st.session_state.setdefault("api_log", []).append(f"URL Shortener Error: {e}")
+        st.session_state.setdefault("api_log", []).append(f"URL Shortener Error in generate_short_link: {e}")
     return None
 
 def send_confirmation_email(user_email, name, picks, tie_breaker, payment, t_name, t_id, is_edit=False, close_time_str="", logo_url=""):
     sender, pwd = st.secrets.get("email_sender"), st.secrets.get("email_password")
     if not sender or not pwd: return False
     try:
+        safe_name = html.escape(str(name))
+        safe_tname = html.escape(str(t_name))
+        safe_tie = html.escape(str(tie_breaker))
+        safe_pay = html.escape(str(payment))
+        
         msg = MIMEMultipart()
-        msg['From'] = formataddr((t_name, sender))
+        msg['From'] = formataddr((safe_tname, sender))
         msg['To'] = user_email
         status_word = "UPDATED" if is_edit else "LOCKED IN"
-        msg['Subject'] = f"{t_name} - ⛳ Your Team is {status_word}"
+        msg['Subject'] = f"{safe_tname} - ⛳ Your Team is {status_word}"
         
-        p_html = "".join([f"<li style='padding: 4px 0;'><b>{p}</b></li>" for p in picks])
+        p_html = "".join([f"<li style='padding: 4px 0;'><b>{html.escape(p)}</b></li>" for p in picks])
         public_link = f"{BASE_URL}?view=public&tourney_id={t_id}"
         
-        edit_notice = f"<p style='color: #e67e22; font-size: 14px; background-color: #fff3e0; padding: 10px; border-radius: 4px; border-left: 3px solid #e67e22;'>✏️ <b>Need to make a change?</b> You can edit your team anytime before <b>{close_time_str}</b>. Just go to the <a href='{public_link}' target='_blank'>Tournament Dashboard</a>, click the <b>🔍 Check Entry</b> tab, and enter your email address to securely unlock your entry!</p>" if close_time_str else ""
+        edit_notice = f"<p style='color: #e67e22; font-size: 14px; background-color: #fff3e0; padding: 10px; border-radius: 4px; border-left: 3px solid #e67e22;'>✏️ <b>Need to make a change?</b> You can edit your team anytime before <b>{html.escape(str(close_time_str))}</b>. Just go to the <a href='{public_link}' target='_blank'>Tournament Dashboard</a>, click the <b>🔍 Check Entry</b> tab, and enter your email address to securely unlock your entry!</p>" if close_time_str else ""
         
-        logo_html = f'<div style="text-align: center; margin-bottom: 20px;"><img src="{logo_url}" style="max-height: 85px; max-width: 100%;" alt="{t_name} Logo"></div>' if logo_url else f'<div style="text-align: center; border-bottom: 2px solid #2ecc71; padding-bottom: 10px; margin-bottom: 20px;"><h2 style="color: #27ae60; margin: 0;">{t_name} Sweepstakes</h2></div>'
+        logo_html = f'<div style="text-align: center; margin-bottom: 20px;"><img src="{logo_url}" style="max-height: 85px; max-width: 100%;" alt="{safe_tname} Logo"></div>' if logo_url else f'<div style="text-align: center; border-bottom: 2px solid #2ecc71; padding-bottom: 10px; margin-bottom: 20px;"><h2 style="color: #27ae60; margin: 0;">{safe_tname} Sweepstakes</h2></div>'
         
         body = f"""
         <html>
           <body style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #2c3e50; line-height: 1.6; max-width: 600px; margin: 0 auto; padding: 20px;">
             {logo_html}
-            <p style="font-size: 16px;">Hi <b>{name}</b>,</p>
+            <p style="font-size: 16px;">Hi <b>{safe_name}</b>,</p>
             <p style="font-size: 16px;">Your entry has been securely <b>{status_word.lower()}</b>! Here are your official team picks for the tournament:</p>
             
             <div style="background-color: #f8f9fa; border-left: 4px solid #2ecc71; padding: 15px 20px; border-radius: 4px; margin: 20px 0;">
@@ -509,8 +515,8 @@ def send_confirmation_email(user_email, name, picks, tie_breaker, payment, t_nam
                   {p_html}
                 </ul>
                 <hr style="border: 0; border-top: 1px solid #dee2e6; margin: 15px 0;">
-                <p style="margin: 5px 0; font-size: 15px;"><b>Tie Breaker Score:</b> <span style="color: #2980b9; font-weight: bold;">{tie_breaker}</span></p>
-                <p style="margin: 5px 0; font-size: 15px;"><b>Payment Method:</b> {payment}</p>
+                <p style="margin: 5px 0; font-size: 15px;"><b>Tie Breaker Score:</b> <span style="color: #2980b9; font-weight: bold;">{safe_tie}</span></p>
+                <p style="margin: 5px 0; font-size: 15px;"><b>Payment Method:</b> {safe_pay}</p>
             </div>
             
             {edit_notice}
@@ -532,33 +538,42 @@ def send_confirmation_email(user_email, name, picks, tie_breaker, payment, t_nam
         server.quit()
         return True
     except Exception as e: 
-        st.session_state.setdefault("api_log", []).append(f"Email Error (send_confirmation): {e}")
+        st.session_state.setdefault("api_log", []).append(f"Email Error in send_confirmation_email: {e}")
         return False
 
-def send_magic_link_email(user_email, t_name, t_id, magic_secret, logo_url=""):
+def send_magic_link_email(user_email, t_name, t_id, logo_url=""):
     sender, pwd = st.secrets.get("email_sender"), st.secrets.get("email_password")
     if not sender or not pwd: return False
     try:
-        ts = int(time.time()) 
+        safe_tname = html.escape(str(t_name))
         clean_email = str(user_email).strip().lower()
-        auth_hash = hashlib.sha256(f"{clean_email}{str(t_id)}{str(magic_secret)}{ts}".encode()).hexdigest()
-        import urllib.parse
-        safe_email = urllib.parse.quote(clean_email)
-        link = f"{BASE_URL}?view=public&tourney_id={t_id}&edit_email={safe_email}&auth={auth_hash}&ts={ts}"
+        token = secrets.token_urlsafe(32)
+        
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        expires = (now_utc + datetime.timedelta(hours=1)).isoformat()
+        
+        get_supabase().table('magic_links').insert({
+            'token': token,
+            'email': clean_email,
+            'tournament_id': str(t_id),
+            'expires_at': expires
+        }).execute()
+        
+        link = f"{BASE_URL}?view=public&tourney_id={t_id}&magic_token={token}"
         
         msg = MIMEMultipart()
-        msg['From'] = formataddr((t_name, sender))
+        msg['From'] = formataddr((safe_tname, sender))
         msg['To'] = user_email
-        msg['Subject'] = f"{t_name} - 🔐 Secure Edit Link"
+        msg['Subject'] = f"{safe_tname} - 🔐 Secure Edit Link"
         
-        logo_html = f'<div style="text-align: center; margin-bottom: 20px;"><img src="{logo_url}" style="max-height: 85px; max-width: 100%;" alt="{t_name} Logo"></div>' if logo_url else ""
+        logo_html = f'<div style="text-align: center; margin-bottom: 20px;"><img src="{logo_url}" style="max-height: 85px; max-width: 100%;" alt="{safe_tname} Logo"></div>' if logo_url else ""
         
         body = f"""
         <html>
           <body style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #2c3e50; line-height: 1.6; max-width: 600px; margin: 0 auto; padding: 20px;">
             {logo_html}
             <p style="font-size: 16px;">Hi,</p>
-            <p style="font-size: 16px;">You requested a secure link to edit your team for the <b>{t_name} Sweepstakes</b>.</p>
+            <p style="font-size: 16px;">You requested a secure link to edit your team for the <b>{safe_tname} Sweepstakes</b>.</p>
             <div style="text-align: center; margin: 30px 0;">
                 <a href="{link}" target="_blank" style="background-color: #34495e; color: white; padding: 12px 24px; text-decoration: none; border-radius: 4px; display: inline-block; font-weight: bold; font-size: 15px;">✏️ Edit Your Team</a>
             </div>
@@ -574,7 +589,7 @@ def send_magic_link_email(user_email, t_name, t_id, magic_secret, logo_url=""):
         server.quit()
         return True
     except Exception as e: 
-        st.session_state.setdefault("api_log", []).append(f"Email Error (send_magic_link): {e}")
+        st.session_state.setdefault("api_log", []).append(f"Email Error in send_magic_link_email: {e}")
         return False
 
 def append_entry_to_sheet(t_id, entry_row):
@@ -596,7 +611,7 @@ def append_entry_to_sheet(t_id, entry_row):
         get_raw_sheet_data.clear() # Instantly update cache
         return True
     except Exception as e: 
-        st.session_state.setdefault("api_log", []).append(f"DB Error (append_entry): {e}")
+        st.session_state.setdefault("api_log", []).append(f"DB Error in append_entry_to_sheet ({t_id}): {e}")
         return False
 
 def update_single_cell_in_sheet(t_id, row_number, header_name, new_value):
@@ -611,12 +626,12 @@ def update_single_cell_in_sheet(t_id, row_number, header_name, new_value):
         }
         col = mapping.get(header_name)
         if col:
-            get_supabase().table('entries').update({col: new_value}).eq('id', row_number).execute()
+            get_supabase().table('entries').update({col: new_value}).eq('id', row_number).eq('tournament_id', str(t_id)).execute()
             get_raw_sheet_data.clear()
             return True
         return False
     except Exception as e:
-        st.session_state.setdefault("api_log", []).append(f"DB Error (update_single_cell): {e}")
+        st.session_state.setdefault("api_log", []).append(f"DB Error in update_single_cell_in_sheet (row {row_number}, t_id {t_id}): {e}")
         return False
 
 def update_specific_entry(t_id, row_index, entry_row):
@@ -632,20 +647,20 @@ def update_specific_entry(t_id, row_index, entry_row):
             'pick_4': entry_row[8],
             'pick_5': entry_row[9]
         }
-        get_supabase().table('entries').update(data).eq('id', row_index).execute()
+        get_supabase().table('entries').update(data).eq('id', row_index).eq('tournament_id', str(t_id)).execute()
         get_raw_sheet_data.clear()
         return True
     except Exception as e: 
-        st.session_state.setdefault("api_log", []).append(f"DB Error (update_specific_entry): {e}")
+        st.session_state.setdefault("api_log", []).append(f"DB Error in update_specific_entry (row {row_index}, t_id {t_id}): {e}")
         return False
         
 def update_paid_status(t_id, row_index, is_paid):
     try:
-        get_supabase().table('entries').update({'paid': is_paid}).eq('id', row_index).execute()
+        get_supabase().table('entries').update({'paid': is_paid}).eq('id', row_index).eq('tournament_id', str(t_id)).execute()
         get_raw_sheet_data.clear()
         return True
     except Exception as e: 
-        st.session_state.setdefault("api_log", []).append(f"DB Error (update_paid_status): {e}")
+        st.session_state.setdefault("api_log", []).append(f"DB Error in update_paid_status (row {row_index}, t_id {t_id}): {e}")
         return False
 
 def send_admin_api_alert(url, error_details):
@@ -675,8 +690,8 @@ def send_admin_api_alert(url, error_details):
             <p style="font-size: 16px; color: #d35400;"><b>This likely means you have exhausted your API quotas across all registered keys!</b></p>
             
             <div style="background-color: #f8f9fa; border-left: 4px solid #e74c3c; padding: 15px; border-radius: 4px; margin: 20px 0; font-family: monospace; font-size: 14px;">
-                <p style="margin: 0 0 10px 0;"><b>Endpoint:</b><br>{url}</p>
-                <p style="margin: 0;"><b>Last Error:</b><br>{error_details}</p>
+                <p style="margin: 0 0 10px 0;"><b>Endpoint:</b><br>{html.escape(url)}</p>
+                <p style="margin: 0;"><b>Last Error:</b><br>{html.escape(error_details)}</p>
             </div>
             
             <p style="font-size: 15px;">Please log in to your RapidAPI dashboard to check your usage and update your keys in the Streamlit secrets if necessary.</p>
@@ -695,7 +710,7 @@ def send_admin_api_alert(url, error_details):
         settings["last_api_alert_time"] = now
         return True
     except Exception as e:
-        st.session_state.setdefault("api_log", []).append(f"Email Error (send_admin_api_alert): {e}")
+        st.session_state.setdefault("api_log", []).append(f"Email Error in send_admin_api_alert: {e}")
         return False
 
 def intelligent_api_call(url, trigger_reason="Unknown"):
@@ -1726,48 +1741,47 @@ if is_public:
     full_df, total_count = get_clean_entries(tid, True, valid_players=valid_p, dns_players=public_dns.split(","))
     
     is_authenticated = False
-    raw_email = st.query_params.get("edit_email")
-    auth_email = raw_email[0] if isinstance(raw_email, list) else raw_email
-    raw_hash = st.query_params.get("auth")
-    auth_hash = raw_hash[0] if isinstance(raw_hash, list) else raw_hash
-    raw_ts = st.query_params.get("ts")
-    auth_ts = raw_ts[0] if isinstance(raw_ts, list) else raw_ts
+    raw_token = st.query_params.get("magic_token")
+    magic_token = raw_token[0] if isinstance(raw_token, list) else raw_token
     auth_email_dec = ""
     
-    if auth_email and auth_hash and auth_ts:
+    if magic_token:
         try:
-            import urllib.parse
-            auth_email_dec = urllib.parse.unquote(str(auth_email))
-            clean_email = auth_email_dec.strip().lower()
-            ts_int = int(auth_ts)
+            sb = get_supabase()
+            now_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
             
-            if int(time.time()) - ts_int < 3600: 
-                expected_hash = hashlib.sha256(f"{clean_email}{str(tid)}{str(MAGIC_LINK_SECRET)}{ts_int}".encode()).hexdigest()
-                if str(auth_hash) == expected_hash:
-                    is_authenticated = True
-                    st.html("""
-                        <script>
-                        let attempts = 0;
-                        let tabPoller = setInterval(function() {
-                            const tabs = document.querySelectorAll("button[role=tab]");
-                            if (tabs.length > 0) {
-                                for (let i = 0; i < tabs.length; i++) {
-                                    if (tabs[i].innerText.includes("Check Entry")) {
-                                        tabs[i].click();
-                                        clearInterval(tabPoller);
-                                        break;
-                                    }
+            res = sb.table('magic_links').select('*').eq('token', str(magic_token)).eq('tournament_id', str(tid)).is_('used_at', 'null').gte('expires_at', now_utc).execute()
+            
+            if res.data and len(res.data) > 0:
+                auth_record = res.data[0]
+                auth_email_dec = auth_record.get('email', '')
+                
+                sb.table('magic_links').update({'used_at': now_utc}).eq('token', str(magic_token)).execute()
+                is_authenticated = True
+                
+                st.html("""
+                    <script>
+                    let attempts = 0;
+                    let tabPoller = setInterval(function() {
+                        const tabs = document.querySelectorAll("button[role=tab]");
+                        if (tabs.length > 0) {
+                            for (let i = 0; i < tabs.length; i++) {
+                                if (tabs[i].innerText.includes("Check Entry")) {
+                                    tabs[i].click();
+                                    clearInterval(tabPoller);
+                                    break;
                                 }
                             }
-                            attempts++;
-                            if (attempts > 60) clearInterval(tabPoller);
-                        }, 50);
-                        </script>
-                    """)
+                        }
+                        attempts++;
+                        if (attempts > 60) clearInterval(tabPoller);
+                    }, 50);
+                    </script>
+                """)
             else:
-                st.error("🚨 This secure edit link has expired (valid for 1 hour). Please request a new one.")
+                st.error("🚨 This secure edit link has expired, been used, or is invalid. Please request a new one.")
         except Exception as e:
-            pass
+            st.session_state.setdefault("api_log", []).append(f"Magic Link Error UI (token {magic_token}): {e}")
 
     current_tab = 0
     
@@ -1837,7 +1851,7 @@ if is_public:
                 success_html = f"""
                 <div style='text-align: center; padding: 40px 20px; background-color: var(--secondary-background-color); border-radius: 10px; border: 2px solid #2ecc71; margin-bottom: 20px;'>
                     <h2 style='color: #27ae60; margin-top: 0;'>🎉 Success! Your team is locked in.</h2>
-                    <p style='font-size: 16px;'>We've securely saved your entry and sent a confirmation email to <b>{st.session_state.get(f'success_email_{tid}')}</b>.</p>
+                    <p style='font-size: 16px;'>We've securely saved your entry and sent a confirmation email to <b>{html.escape(st.session_state.get(f'success_email_{tid}', ''))}</b>.</p>
                     <p style='font-size: 15px; opacity: 0.8;'>You can review or edit your picks at any time before the deadline using the <b>🔍 Check Entry</b> tab.</p>
                 </div>
                 """
@@ -1974,7 +1988,7 @@ if is_public:
                     edit_success_html = f"""
                     <div style='text-align: center; padding: 40px 20px; background-color: var(--secondary-background-color); border-radius: 10px; border: 2px solid #2ecc71; margin-bottom: 20px;'>
                         <h2 style='color: #27ae60; margin-top: 0;'>✅ Team Updated Successfully!</h2>
-                        <p style='font-size: 16px;'>We've securely saved your changes and sent a new confirmation email to <b>{st.session_state.get(f'edit_success_email_{tid}')}</b>.</p>
+                        <p style='font-size: 16px;'>We've securely saved your changes and sent a new confirmation email to <b>{html.escape(st.session_state.get(f'edit_success_email_{tid}', ''))}</b>.</p>
                     </div>
                     """
                     st.markdown(edit_success_html, unsafe_allow_html=True)
@@ -1997,7 +2011,7 @@ if is_public:
                         if not is_authenticated and is_accepting_entries:
                             if st.button("📧 Send Secure Edit Link for All Entries", type="primary", width="stretch"):
                                 with st.spinner("Sending secure link to your email..."):
-                                    if send_magic_link_email(email_input, tnm, tid, MAGIC_LINK_SECRET, public_logo):
+                                    if send_magic_link_email(email_input, tnm, tid, public_logo):
                                         st.success("✅ Secure edit link sent! Please check your email inbox to unlock your entries.")
                                     else:
                                         st.error("🚨 Failed to send email. Please check configuration.")
@@ -2315,11 +2329,9 @@ else:
                 reveal_str = datetime.datetime.combine(reveal_d, reveal_t).strftime("%Y-%m-%d %H:%M:%S")
                 
                 with st.spinner("Saving to database..."):
-                    # Write directly to Supabase so it survives a reboot/cache clear
                     update_config(t_id, 'close_time', close_str)
                     update_config(t_id, 'reveal_time', reveal_str)
                     
-                    # Clear the specific caches so the UI updates immediately
                     fetch_close_time_from_db.clear()
                     fetch_reveal_time_from_db.clear()
                     
