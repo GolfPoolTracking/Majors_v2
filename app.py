@@ -635,6 +635,9 @@ def append_entry_to_sheet(t_id, payload):
             new_picks = set(payload.get('picks', []))
             for r in existing.data:
                 old_picks = set([str(r.get(f'pick_{i}', '')) for i in range(1,6)])
+                # INTENTIONAL: only block identical pick sets from the same email.
+                # Multiple teams per email with different picks are allowed by design
+                # (see (Team 2) rendering logic in get_clean_entries).
                 if new_picks == old_picks:
                     st.session_state.setdefault("api_log", []).append(f"Duplicate block hit for {clean_email}")
                     return "DUPLICATE"
@@ -1699,9 +1702,16 @@ if is_public:
             reveal_time_str_ui = reveal_time.strftime('%a, %b %d at %I:%M %p')
             
     now_utc = datetime.datetime.now(datetime.timezone.utc)
-    now_naive = datetime.datetime.now()
-    is_accepting_entries = close_time and now_naive < close_time 
-    is_pre_reveal = reveal_time and now_naive < reveal_time
+    # Use UTC-aware comparison so the deadline is correct regardless of server timezone.
+    # close_time and reveal_time are naive (stored without tz) — treat them as UTC
+    # to match the UTC-aware now_utc used everywhere else in the app.
+    _now_for_check = datetime.datetime.now(datetime.timezone.utc)
+    def _naive_to_utc(dt):
+        if dt is None: return None
+        if dt.tzinfo is None: return dt.replace(tzinfo=datetime.timezone.utc)
+        return dt
+    is_accepting_entries = close_time and _now_for_check < _naive_to_utc(close_time)
+    is_pre_reveal = reveal_time and _now_for_check < _naive_to_utc(reveal_time)
     show_real = True 
     
     raw_rules = get_config(tid, 'rules', DEFAULT_RULES)
@@ -1782,7 +1792,7 @@ if is_public:
             else:
                 st.error("🚨 This secure edit link has expired, been used, or is invalid. Please request a new one.")
         except Exception as e:
-            st.session_state.setdefault("api_log", []).append(f"Magic Link Error UI: {type(e).__name__}")
+            st.session_state.setdefault("api_log", []).append(f"Magic Link Error UI: {type(e).__name__} - {e}")
 
     auth_email_dec = st.session_state.get(f"auth_email_{tid}", "")
     is_authenticated = bool(auth_email_dec)
