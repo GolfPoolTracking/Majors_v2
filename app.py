@@ -785,8 +785,12 @@ def get_raw_entry_list(selected_t_id):
     cache_key = f"entry_list_{selected_t_id}"
     now = datetime.datetime.now(datetime.timezone.utc)
     
-    if cache_key in cache and now < cache[cache_key]['expire']: 
-        return cache[cache_key]['data']
+    if cache_key in cache:
+        try:
+            if now < cache[cache_key]['expire']: 
+                return cache[cache_key]['data']
+        except TypeError:
+            pass # Ignore naive datetime mismatch
         
     data = intelligent_api_call(f"https://golf-leaderboard-data.p.rapidapi.com/entry-list/{selected_t_id}", "Entry List Fetch")
     
@@ -836,8 +840,12 @@ def fetch_smart_leaderboard(selected_t_id):
     now = datetime.datetime.now(datetime.timezone.utc)
     cache_key = f"lb_{selected_t_id}"
     
-    if cache_key in cache and now < cache[cache_key]["next_fetch_allowed"]:
-        return cache[cache_key]["data"], cache[cache_key]["next_fetch_allowed"], cache[cache_key]["last_fetch"], cache[cache_key]["full_data"], "⚡ Active Memory Cache"
+    if cache_key in cache:
+        try:
+            if now < cache[cache_key]["next_fetch_allowed"]:
+                return cache[cache_key]["data"], cache[cache_key]["next_fetch_allowed"], cache[cache_key]["last_fetch"], cache[cache_key]["full_data"], "⚡ Active Memory Cache"
+        except TypeError:
+            pass # Cache has old naive datetime; ignore and fetch fresh data
         
     data = intelligent_api_call(f"https://golf-leaderboard-data.p.rapidapi.com/leaderboard/{selected_t_id}")
     if data and get_safe_api_results(data):
