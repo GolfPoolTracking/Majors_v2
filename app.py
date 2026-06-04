@@ -224,18 +224,11 @@ def get_config(t_id, column, default=""):
 
 def update_config(t_id, column, value, t_name=None):
     try:
-        sb = get_supabase()
-        existing = sb.table('tournament_configs').select('tournament_id').eq('tournament_id', str(t_id)).execute()
-        
-        update_data = {column: value}
+        update_data = {'tournament_id': str(t_id), column: value}
         if t_name and str(t_name).strip(): 
             update_data['tournament_name'] = str(t_name).strip()
             
-        if existing.data:
-            sb.table('tournament_configs').update(update_data).eq('tournament_id', str(t_id)).execute()
-        else:
-            update_data['tournament_id'] = str(t_id)
-            sb.table('tournament_configs').insert(update_data).execute()
+        get_supabase().table('tournament_configs').upsert(update_data, on_conflict='tournament_id').execute()
         return True
     except Exception as e:
         st.session_state.setdefault("api_log", []).append(f"DB Write Error in update_config ({column}, t_id {t_id}): {type(e).__name__} - {e}")
@@ -362,7 +355,11 @@ def save_hide_tt_to_sheet(t_id, hide_tt_bool):
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_payout_config_from_sheet(t_id):
     val = get_config(t_id, 'payout_config', {})
-    return json.dumps(val) if isinstance(val, dict) else "{}"
+    if isinstance(val, dict):
+        return json.dumps(val)
+    if isinstance(val, str) and val.strip():
+        return val
+    return "{}"
 
 def save_payout_config_to_sheet(t_id, json_str):
     try:
@@ -377,35 +374,34 @@ def save_payout_config_to_sheet(t_id, json_str):
 def get_raw_sheet_data(t_id):
     if not t_id: return pd.DataFrame()
     try:
-        res = get_supabase().table('tournament_standings').select('*').eq('tournament_id', str(t_id)).order('entry_id').execute()
+        # Pull directly from base 'entries' table to ensure perfect schema alignment
+        res = get_supabase().table('entries').select('*').eq('tournament_id', str(t_id)).order('id').execute()
         if not res.data: return pd.DataFrame()
         
         df = pd.DataFrame(res.data)
         
-        if 'entry_id' not in df.columns or 'participant_name' not in df.columns:
-            st.session_state.setdefault("api_log", []).append(f"DB Error in get_raw_sheet_data ({t_id}): Missing 'entry_id' or 'participant_name'. Columns: {df.columns.tolist()}")
-            return pd.DataFrame()
-        
         df = df.rename(columns={
-            'entry_id': 'Sheet_Row',
-            'participant_name': 'Name',
+            'id': 'Sheet_Row',
+            'name': 'Name',
             'email': 'Email',                   
             'payment_method': 'Payment Method', 
             'tie_breaker': 'Tie Breaker',
             'paid': 'Paid'
         })
         
-        if 'picks' in df.columns:
-            for i in range(5):
-                df[f'Pick {i+1}'] = df['picks'].apply(lambda x: x[i] if isinstance(x, list) and len(x) > i else "")
-        else:
-            for i in range(5): df[f'Pick {i+1}'] = ""
+        # Flatten pick_1 .. pick_5 back to Pick 1 .. Pick 5 natively
+        for i in range(1, 6):
+            col_name = f'pick_{i}'
+            if col_name in df.columns:
+                df[f'Pick {i}'] = df[col_name]
+            else:
+                df[f'Pick {i}'] = ""
             
-        df = df.drop(columns=['picks', 'tournament_id'], errors='ignore')
+        df = df.drop(columns=[f'pick_{i}' for i in range(1, 6)] + ['tournament_id', 'created_at', 'updated_at'], errors='ignore')
             
         return df.copy()
     except Exception as e:
-        st.session_state.setdefault("api_log", []).append(f"DB Read Error in get_raw_sheet_data (tournament_standings view): {type(e).__name__} - {e}")
+        st.session_state.setdefault("api_log", []).append(f"DB Read Error in get_raw_sheet_data: {type(e).__name__} - {e}")
         return pd.DataFrame()
         
 def send_field_change_email(user_email, name, removed_picks, added_to_field, t_name, t_id, close_time_str, logo_url):
@@ -717,7 +713,8 @@ def send_admin_api_alert(url, error_details):
 
 def intelligent_api_call(url, trigger_reason="Unknown"):
     settings = get_settings_cache()
-    all_keys = [k for k in st.secrets.keys() if "api" in k.lower() and "key" in k.lower()]
+    # Explicitly check for 'api_keys' list array first, fallback to iterating keys if missing
+    all_keys = st.secrets.get("api_keys", [k for k in st.secrets.keys() if "api" in k.lower() and "key" in k.lower() and "supabase" not in k.lower()])
     if not all_keys: return None 
     current_active = settings.get("active_api_key", all_keys[0])
     
@@ -725,7 +722,8 @@ def intelligent_api_call(url, trigger_reason="Unknown"):
     
     for key_name in [current_active] + [k for k in all_keys if k != current_active]:
         try:
-            resp = requests.get(url, headers={"X-RapidAPI-Key": st.secrets[key_name], "X-RapidAPI-Host": "golf-leaderboard-data.p.rapidapi.com"})
+            val = st.secrets.get(key_name) if key_name in st.secrets else key_name
+            resp = requests.get(url, headers={"X-RapidAPI-Key": val, "X-RapidAPI-Host": "golf-leaderboard-data.p.rapidapi.com"})
             if resp.status_code == 200:
                 settings["active_api_key"] = key_name
                 quota = resp.headers.get("x-ratelimit-requests-remaining") or resp.headers.get("X-RateLimit-Requests-Remaining")
@@ -981,11 +979,12 @@ def render_roster_table(picks, p_info_lower, rounds_active, counting_map, is_liv
     rows = []
     for p in picks:
         p_key = str(p).lower()
+        p_safe = html.escape(str(p))
         if p_key not in p_info_lower:
-            rows.append(f"<tr><td style='padding-bottom: 5px;'>⚠️ {p}</td><td colspan='{len(rounds_active)+1}' style='color:red;'>Not in Field</td></tr>")
+            rows.append(f"<tr><td style='padding-bottom: 5px;'>⚠️ {p_safe}</td><td colspan='{len(rounds_active)+1}' style='color:red;'>Not in Field</td></tr>")
             continue
         d = p_info_lower[p_key]; stt = d['status']
-        row_html = f"<tr><td style='padding-right:15px; min-width:140px; padding-bottom: 5px;'>{p}</td>"
+        row_html = f"<tr><td style='padding-right:15px; min-width:140px; padding-bottom: 5px;'>{p_safe}</td>"
         for r in rounds_active:
             s = d['rounds'].get(r, None); is_cnt = p_key in counting_map.get(r, [])
             if s is None and stt in ['cut', 'wd', 'dq']: val = f"<span style='color:#e74c3c;'>{stt.upper()}</span>"
@@ -1262,14 +1261,14 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
         if not is_admin_download:
             if logo_url:
                 try:
-                    st.markdown(f"<div style='text-align: center; padding-bottom: 10px;'><img src='{logo_url}' style='max-width: 250px; max-height: 150px; width: 100%; object-fit: contain;'></div>", unsafe_allow_html=True)
+                    st.markdown(f"<div style='text-align: center; padding-bottom: 10px;'><img src='{html.escape(str(logo_url))}' style='max-width: 250px; max-height: 150px; width: 100%; object-fit: contain;'></div>", unsafe_allow_html=True)
                 except Exception: pass
             elif not hide_title:
-                st.header(f"🏆 {t_name.split('(')[0]}")
+                st.header(f"🏆 {html.escape(str(t_name).split('(')[0])}")
 
             if t_status not in ['pre', ''] and current_r > 0:
                 if t_status == 'completed':
-                    status_bar_html = f"<div class='compact-container' style='display: flex; justify-content: center; align-items: center; padding: 12px;'><div style='font-weight: bold; font-size: 1.15em; color: #2ecc71;'>🏆 {status_txt}</div></div>"
+                    status_bar_html = f"<div class='compact-container' style='display: flex; justify-content: center; align-items: center; padding: 12px;'><div style='font-weight: bold; font-size: 1.15em; color: #2ecc71;'>🏆 {html.escape(str(status_txt))}</div></div>"
                     st.markdown(status_bar_html, unsafe_allow_html=True)
                 else:
                     last_ts = int(last_f.timestamp() * 1000) if last_f else 0
@@ -1291,7 +1290,7 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
                     </head>
                     <body>
                         <div class="box">
-                            <div class="title">⛳ {status_txt}</div>
+                            <div class="title">⛳ {html.escape(str(status_txt))}</div>
                             <div class="row">
                                 <span>🕒 <b>Last Check:</b> <span id="t-last">...</span></span>
                                 <span>⏳ <b>Next Check:</b> <span id="t-next">...</span></span>
@@ -1325,7 +1324,7 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
         df_resp['_entry_num'] = df_resp.groupby('_name_lower').cumcount() + 1
         
         def make_display_name(r):
-            base = str(r[name_col]).strip()
+            base = html.escape(str(r[name_col]).strip())
             if r['_total_entries'] > 1:
                 return f"{base} <span style='font-size: 0.75em; background-color: rgba(130, 130, 130, 0.25); padding: 2px 6px; border-radius: 10px; margin-left: 6px; font-weight: normal; vertical-align: middle;'>Team {r['_entry_num']}</span>"
             return base
@@ -1424,7 +1423,7 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
                     r_str = str(row.get('DRank', '-'))
                     if r_str == '-': continue
                     if r_str not in grouped_ranks: grouped_ranks[r_str] = []
-                    grouped_ranks[r_str].append(str(row['Participant']))
+                    grouped_ranks[r_str].append(html.escape(str(row['Participant'])))
                 
                 for r_str, names in grouped_ranks.items():
                     match = re.search(r'\d+', r_str)
@@ -1504,18 +1503,18 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
             for p in row['Picks']:
                 p_key = p.lower()
                 if not api_data_loaded: pass 
-                elif p_key not in p_info_lower: warn_list.append(f"Invalid Pick: {p}")
+                elif p_key not in p_info_lower: warn_list.append(html.escape(f"Invalid Pick: {p}"))
                 elif vp_lower and p_key not in vp_lower:
-                    if p_info_lower[p_key]['status'] not in ['cut', 'wd', 'dq']: warn_list.append(f"Possible WD/DNS: {p}")
+                    if p_info_lower[p_key]['status'] not in ['cut', 'wd', 'dq']: warn_list.append(html.escape(f"Possible WD/DNS: {p}"))
             
-            for w in row['SheetWarnings']: warn_list.append(str(w))
+            for w in row['SheetWarnings']: warn_list.append(html.escape(str(w)))
             warn_list = list(dict.fromkeys(warn_list))
             
             if row['Elim']: 
                 score_block = "<div style='color: #e74c3c; font-weight: bold; white-space: nowrap;'>❌ CUT</div>"
             else: 
                 score_color = '#2ecc71' 
-                score_block = f"<div style='white-space: nowrap;'><b style='color: {score_color};'>{score_txt}</b> <span style='color: var(--text-color); opacity: 0.6; font-size: 0.9em;'>({row['Tie']})</span></div>"
+                score_block = f"<div style='white-space: nowrap;'><b style='color: {score_color};'>{score_txt}</b> <span style='color: var(--text-color); opacity: 0.6; font-size: 0.9em;'>({html.escape(str(row['Tie']))})</span></div>"
                 
             warn_html = f"<div style='color: #e67e22; font-size: 0.85em; white-space: nowrap;'>⚠️ {' | '.join(warn_list)}</div>" if warn_list else "<div></div>"
             
@@ -1729,12 +1728,12 @@ if is_public:
     
     if public_logo:
         try:
-            st.markdown(f"<div style='text-align: center; padding-bottom: 10px;'><img src='{public_logo}' style='max-width: 250px; max-height: 150px; width: 100%; object-fit: contain;'></div>", unsafe_allow_html=True)
+            st.markdown(f"<div style='text-align: center; padding-bottom: 10px;'><img src='{html.escape(str(public_logo))}' style='max-width: 250px; max-height: 150px; width: 100%; object-fit: contain;'></div>", unsafe_allow_html=True)
             logo_rendered = True
         except Exception: pass 
             
     if not logo_rendered:
-        st.markdown(f"<h1 style='text-align: center; padding-bottom: 10px;'>🏆 {tnm.split('(')[0]}</h1>", unsafe_allow_html=True)
+        st.markdown(f"<h1 style='text-align: center; padding-bottom: 10px;'>🏆 {html.escape(str(tnm).split('(')[0])}</h1>", unsafe_allow_html=True)
     
     tab_names = ["🏆 Leaderboard"]
     if is_accepting_entries: tab_names.append("📝 Enter Team")
@@ -2043,10 +2042,10 @@ if is_public:
                                 c1, c2 = st.columns([3, 1])
                                 with c1:
                                     if is_authenticated:
-                                        st.markdown(f"**Team Name:** {r[name_col_val]}  |  **Tie Breaker:** `{tie_val}`\n\n**Picks:** {', '.join(p_list)}")
-                                        if not str(r.get("Field Status", "✅ All Valid")).startswith("✅"): st.error(f"🚨 Roster Issue: {r.get('Field Status')}")
+                                        st.markdown(f"**Team Name:** {html.escape(str(r[name_col_val]))}  |  **Tie Breaker:** `{tie_val}`\n\n**Picks:** {html.escape(', '.join(p_list))}")
+                                        if not str(r.get("Field Status", "✅ All Valid")).startswith("✅"): st.error(f"🚨 Roster Issue: {html.escape(str(r.get('Field Status')))}")
                                     else:
-                                        st.markdown(f"**Team Name:** {r[name_col_val]}\n\n🔒 *Picks and Tie Breaker are hidden. Click the button above to send a secure link to your email to view or edit this entry.*")
+                                        st.markdown(f"**Team Name:** {html.escape(str(r[name_col_val]))}\n\n🔒 *Picks and Tie Breaker are hidden. Click the button above to send a secure link to your email to view or edit this entry.*")
                                         if not str(r.get("Field Status", "✅ All Valid")).startswith("✅"): st.error(f"🚨 Roster Issue Detected! Please use the secure link to fix your team.")
                                         
                                 with c2:
@@ -2174,7 +2173,7 @@ else:
                     del st.query_params["token"]
                 st.rerun()
         
-        ak = [k for k in st.secrets.keys() if "api" in k.lower() and "key" in k.lower()]
+        ak = st.secrets.get("api_keys", [k for k in st.secrets.keys() if "api" in k.lower() and "key" in k.lower() and "supabase" not in k.lower()])
         if not ak: st.error("No API keys found in secrets!"); st.stop()
             
         active = st.selectbox("API Key", ak, index=ak.index(settings.get("active_api_key", ak[0])) if settings.get("active_api_key") in ak else 0)
@@ -2296,7 +2295,9 @@ else:
             
             st.markdown("---")
             st.write("⏳ **Entries Close Time**")
-            default_close_dt = datetime.datetime.strptime(str(t_start), "%Y-%m-%d %H:%M:%S").replace(hour=5, minute=0, second=0) if t_start else datetime.datetime.now()
+            try: default_close_dt = datetime.datetime.strptime(str(t_start), "%Y-%m-%d %H:%M:%S").replace(hour=5, minute=0, second=0) if t_start else datetime.datetime.now()
+            except (ValueError, TypeError): default_close_dt = datetime.datetime.now()
+            
             db_close_admin = fetch_close_time_from_db(t_id)
             try: current_close_dt = datetime.datetime.strptime(db_close_admin, "%Y-%m-%d %H:%M:%S") if db_close_admin else default_close_dt
             except (ValueError, TypeError): current_close_dt = default_close_dt
@@ -2306,7 +2307,9 @@ else:
             with c_t2: close_t = st.time_input("Close Time", value=current_close_dt.time())
             
             st.write("🔒 **Public Reveal Time**")
-            default_reveal_dt = datetime.datetime.strptime(str(t_start), "%Y-%m-%d %H:%M:%S").replace(hour=5, minute=0, second=0) if t_start else datetime.datetime.now()
+            try: default_reveal_dt = datetime.datetime.strptime(str(t_start), "%Y-%m-%d %H:%M:%S").replace(hour=5, minute=0, second=0) if t_start else datetime.datetime.now()
+            except (ValueError, TypeError): default_reveal_dt = datetime.datetime.now()
+            
             db_reveal_admin = fetch_reveal_time_from_db(t_id)
             try: current_reveal_dt = datetime.datetime.strptime(db_reveal_admin, "%Y-%m-%d %H:%M:%S") if db_reveal_admin else default_reveal_dt
             except (ValueError, TypeError): current_reveal_dt = default_reveal_dt
@@ -2397,12 +2400,12 @@ else:
         
         if admin_logo:
             try:
-                st.markdown(f"<div style='text-align: center; padding-bottom: 10px;'><img src='{admin_logo}' style='max-width: 250px; max-height: 150px; width: 100%; object-fit: contain;'></div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='text-align: center; padding-bottom: 10px;'><img src='{html.escape(str(admin_logo))}' style='max-width: 250px; max-height: 150px; width: 100%; object-fit: contain;'></div>", unsafe_allow_html=True)
                 logo_rendered = True
             except Exception: pass 
 
         if not logo_rendered:
-            st.markdown(f"<h1 style='text-align: center; padding-bottom: 10px;'>🏆 {t_name_display}</h1>", unsafe_allow_html=True)
+            st.markdown(f"<h1 style='text-align: center; padding-bottom: 10px;'>🏆 {html.escape(str(t_name_display))}</h1>", unsafe_allow_html=True)
 
         t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11 = st.tabs(["🏆 Leaderboard", "📝 Entries", "💵 Financials", "⛳ Official PGA Scores", "💾 Export", "📡 API Status", "💻 Raw JSON", "📜 Rules", "🏌️ Field", "📈 Analytics", "🔀 Aliases"])
         
@@ -2470,7 +2473,7 @@ else:
                 if target_team_str:
                     target_name = target_team_str.split(" (Current:")[0]
                     target_row = admin_df[admin_df[name_col] == target_name].iloc[0]
-                    st.markdown(f"**Editing:** `{target_name}`")
+                    st.markdown(f"**Editing:** `{html.escape(str(target_name))}`")
                     
                     c1, c2 = st.columns([2, 1])
                     with c1: 
@@ -2655,7 +2658,7 @@ else:
                 export_final['Player Name'] = df_export['Participant']
                 export_final['Total Score'] = df_export.apply(lambda x: "CUT" if x['Elim'] else x['Total'], axis=1)
                 export_final['Tie Breaker'] = df_export['Tie']
-                st.download_button("⬇️ Download Top-Level Results (CSV)", export_final.to_csv(index=False).encode('utf-8'), f"{t_key.replace(' ', '_').split('(')[0]}_Leaderboard.csv", "text/csv")
+                st.download_button("⬇️ Download Top-Level Results (CSV)", export_final.to_csv(index=False).encode('utf-8'), f"{html.escape(str(t_key)).replace(' ', '_').split('(')[0]}_Leaderboard.csv", "text/csv")
             else: st.warning("No data to export.")
                 
         with t6:
@@ -2785,7 +2788,7 @@ else:
                     if ':' in a:
                         w, c = a.split(':')
                         colA, colB = st.columns([4, 1])
-                        with colA: st.markdown(f"**{w.strip().title()}** ➡️ mapped to API name **{c.strip().title()}**")
+                        with colA: st.markdown(f"**{html.escape(w.strip().title())}** ➡️ mapped to API name **{html.escape(c.strip().title())}**")
                         with colB:
                             if st.button("❌ Remove", key=f"rm_alias_{idx}"):
                                 alias_list.pop(idx)
