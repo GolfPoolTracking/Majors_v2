@@ -54,7 +54,6 @@ DEFAULT_RULES = """### 🏆 Tournament Rules\n\n⛳ **The Team:** Pick **5** pla
 
 @st.cache_resource
 def get_supabase() -> Client:
-    """Authenticates and returns a persistent Supabase client."""
     return create_client(st.secrets["supabase"]["url"], st.secrets["supabase"]["key"])
 
 @st.cache_resource
@@ -233,10 +232,66 @@ def get_dropdown_index(clean_name, fmt_list):
         if item.split(" (Top 20")[0].strip().lower() == sn: return i + 1
     return 0
 
-# --- LEGACY NAMING COMPATIBILITY ---
-# The following config functions retain their legacy '*_to_sheet' / '*_from_sheet' names to 
-# avoid breaking downstream templates, but they now exclusively read/write to the Supabase DB.
+# --- STATE INFERENCE & DATA HELPERS ---
+def derive_tournament_state(lb_data, live_details, is_r4_live_mode=False, is_admin_view=False):
+    """Centralized tournament state and round calculation."""
+    t_status = normalize_pga_status(live_details.get('status', ''))
+    api_curr_r = safe_int(live_details.get('current_round', 0))
+    player_curr_r = max([safe_int(p.get('current_round', 0)) for p in lb_data] + [0])
+    current_r = max(api_curr_r, player_curr_r)
+    
+    active_field = [p for p in lb_data if normalize_pga_status(p.get('status', '')) == 'active']
+    not_started_current = [p for p in lb_data if normalize_pga_status(p.get('status', '')) == 'pre' and safe_int(p.get('current_round', 0)) == current_r]
+    total_holes_live = sum(safe_int(p.get('holes_played', 0)) for p in lb_data)
+    
+    is_round_finished_consensus = False
+    if t_status in ['completed', 'endofday']:
+        is_round_finished_consensus = True
+    elif active_field and all(safe_int(p.get('holes_played', 0)) == 18 for p in active_field):
+        is_round_finished_consensus = True
+    elif t_status == 'active' and not active_field and not not_started_current:
+        is_round_finished_consensus = True
+    elif t_status == 'active' and total_holes_live == 0:
+        is_round_finished_consensus = True
 
+    active_holes = [safe_int(p.get('holes_played', 0)) for p in active_field]
+    last_group_teed_off = False
+    last_group_htr = 0
+    is_r4_fully_done = False
+    
+    if not active_holes:
+        if any(normalize_pga_status(p.get('status', '')) == 'completed' for p in lb_data):
+            last_group_teed_off = True
+            last_group_htr = 18
+            if current_r == 4: is_r4_fully_done = True
+    else:
+        min_hp = min(active_holes)
+        if min_hp == 0: 
+            last_group_teed_off = False
+        else:
+            last_group_htr = min_hp
+            last_group_teed_off = True
+
+    if is_admin_view:
+        sweep_max_round = current_r
+    else:
+        if current_r == 4:
+            if is_r4_live_mode or last_group_teed_off: sweep_max_round = 4
+            else: sweep_max_round = 3
+        elif is_round_finished_consensus: sweep_max_round = current_r
+        else: sweep_max_round = current_r - 1
+        
+    return {
+        'current_r': current_r,
+        't_status': t_status,
+        'is_round_finished_consensus': is_round_finished_consensus,
+        'sweep_max_round': sweep_max_round,
+        'last_group_teed_off': last_group_teed_off,
+        'last_group_htr': last_group_htr,
+        'is_r4_fully_done': is_r4_fully_done
+    }
+
+# --- CONFIG COMPATIBILITY ---
 @st.cache_data(ttl=300, show_spinner=False)
 def get_all_configs_cached(t_id):
     try:
@@ -260,14 +315,14 @@ def update_config(t_id, column, value, t_name=None):
         res = get_supabase().table('tournament_configs').upsert(update_data, on_conflict='tournament_id').execute()
         if not res.data: raise ValueError("Upsert returned empty data")
         
-        get_all_configs_cached.clear() # unified cache buster
+        get_all_configs_cached.clear() 
         return True
     except Exception as e:
         st.session_state.setdefault("api_log", []).append(f"DB Write Error in update_config ({column}): {type(e).__name__} - {e}")
         return False
 
 def log_to_sheet(event_type, message):
-    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     st.session_state["api_log"].insert(0, f"[{ts}] {event_type}: {message}")
     try:
         t_id = st.session_state.get('current_t_id', 'General')
@@ -441,7 +496,7 @@ def send_field_change_email(user_email, name, removed_picks, added_to_field, t_n
 
 def generate_short_link(long_url):
     try:
-        resp = requests.get(f"https://is.gd/create.php?format=simple&url={urllib.parse.quote(long_url)}", timeout=5)
+        resp = requests.get(f"https://is.gd/create.php?format=simple&url={urllib.parse.quote(long_url)}", timeout=10)
         if resp.status_code == 200 and "is.gd" in resp.text: return resp.text.strip()
     except requests.RequestException as e: 
         st.session_state.setdefault("api_log", []).append(f"URL Shortener Error in generate_short_link: {type(e).__name__} - {e}")
@@ -538,35 +593,42 @@ def send_magic_link_email(user_email, t_name, t_id, logo_url=""):
         st.session_state.setdefault("api_log", []).append(f"Email Error in send_magic_link_email: {type(e).__name__} - {e}")
         return False
 
-def append_entry_to_sheet(t_id, entry_row):
+def safe_entry_payload(t_id, payload_dict):
+    """Enforces constraints before writing an entry to Supabase."""
+    picks = payload_dict.get('picks', [])
+    if not isinstance(picks, list) or len(picks) != 5:
+        raise ValueError("Invalid picks format or length. Expected list of 5.")
+    
+    return {
+        'tournament_id': str(t_id),
+        'name': str(payload_dict.get('name', '')),
+        'email': str(payload_dict.get('email', '')).strip().lower(),
+        'payment_method': str(payload_dict.get('payment_method', '')),
+        'tie_breaker': int(safe_int(payload_dict.get('tie_breaker', 0))),
+        'pick_1': str(picks[0]),
+        'pick_2': str(picks[1]),
+        'pick_3': str(picks[2]),
+        'pick_4': str(picks[3]),
+        'pick_5': str(picks[4])
+    }
+
+def append_entry_to_sheet(t_id, payload):
     try:
-        if len(entry_row) != 10: raise ValueError("Malformed entry row length")
-        clean_email = str(entry_row[2]).strip().lower()
-        tie_val = int(entry_row[4])
+        clean_email = str(payload.get('email', '')).strip().lower()
         
-        # Defensive duplicate check
+        # Defensive duplicate check: Exact match intercepts silently
         existing = get_supabase().table('entries').select('*').eq('tournament_id', str(t_id)).eq('email', clean_email).execute()
         if existing.data:
-            new_picks = set(entry_row[5:10])
+            new_picks = set(payload.get('picks', []))
             for r in existing.data:
                 old_picks = set([str(r.get(f'pick_{i}', '')) for i in range(1,6)])
                 if new_picks == old_picks:
                     st.session_state.setdefault("api_log", []).append(f"Duplicate block hit for {clean_email}")
-                    return True # Silently absorb duplicate 
-
-        data = {
-            'tournament_id': str(t_id),
-            'name': str(entry_row[1]),
-            'email': clean_email,
-            'payment_method': str(entry_row[3]),
-            'tie_breaker': tie_val,
-            'pick_1': str(entry_row[5]),
-            'pick_2': str(entry_row[6]),
-            'pick_3': str(entry_row[7]),
-            'pick_4': str(entry_row[8]),
-            'pick_5': str(entry_row[9]),
-            'paid': False
-        }
+                    return "DUPLICATE"
+                    
+        data = safe_entry_payload(t_id, payload)
+        data['paid'] = False
+        
         res = get_supabase().table('entries').insert(data).execute()
         if not res.data: raise ValueError("Insert returned no data")
         
@@ -597,20 +659,9 @@ def update_single_cell_in_sheet(t_id, row_number, header_name, new_value):
         st.session_state.setdefault("api_log", []).append(f"DB Error in update_single_cell_in_sheet (row {row_number}): {type(e).__name__} - {e}")
         return False
 
-def update_specific_entry(t_id, row_index, entry_row):
+def update_specific_entry(t_id, row_index, payload):
     try:
-        if len(entry_row) != 10: raise ValueError("Malformed entry row length")
-        data = {
-            'name': str(entry_row[1]),
-            'email': str(entry_row[2]).strip().lower(),
-            'payment_method': str(entry_row[3]),
-            'tie_breaker': int(entry_row[4]),
-            'pick_1': str(entry_row[5]),
-            'pick_2': str(entry_row[6]),
-            'pick_3': str(entry_row[7]),
-            'pick_4': str(entry_row[8]),
-            'pick_5': str(entry_row[9])
-        }
+        data = safe_entry_payload(t_id, payload)
         res = get_supabase().table('entries').update(data).eq('id', row_index).eq('tournament_id', str(t_id)).execute()
         if not res.data: raise ValueError("Update returned no rows")
         get_raw_sheet_data.clear()
@@ -635,7 +686,7 @@ def send_admin_api_alert(url, error_details):
     
     settings = get_settings_cache()
     last_alert = settings.get("last_api_alert_time")
-    now = datetime.datetime.now()
+    now = datetime.datetime.now(datetime.timezone.utc)
     
     if last_alert and (now - last_alert).total_seconds() < 3600:
         return False
@@ -681,14 +732,13 @@ def send_admin_api_alert(url, error_details):
 
 def intelligent_api_call(url, trigger_reason="Unknown"):
     settings = get_settings_cache()
-    # Explicit Canonical Config Priority
+    # Explicit Canonical Config Priority (No broad scanning)
     all_keys = st.secrets.get("api_keys")
-    if not all_keys:
-        # Legacy scanning fallback 
-        all_keys = [k for k in st.secrets.keys() if "api" in k.lower() and "key" in k.lower() and "supabase" not in k.lower()]
-    if not all_keys: return None 
+    if not all_keys or not isinstance(all_keys, list):
+        log_to_sheet("API CRITICAL", "api_keys list missing from secrets.toml")
+        return None 
+        
     current_active = settings.get("active_api_key", all_keys[0])
-    
     last_error = "Unknown Error"
     
     for key_name in [current_active] + [k for k in all_keys if k != current_active]:
@@ -733,7 +783,7 @@ def get_top_20_players():
 def get_raw_entry_list(selected_t_id):
     cache = get_api_cache()
     cache_key = f"entry_list_{selected_t_id}"
-    now = datetime.datetime.now() # naive server time
+    now = datetime.datetime.now(datetime.timezone.utc)
     
     if cache_key in cache and now < cache[cache_key]['expire']: 
         return cache[cache_key]['data']
@@ -783,7 +833,7 @@ def get_formatted_field(selected_t_id, top_20_dict):
 
 def fetch_smart_leaderboard(selected_t_id):
     cache = get_api_cache()
-    now = datetime.datetime.now() # naive server time for cache TTL tracking
+    now = datetime.datetime.now(datetime.timezone.utc)
     cache_key = f"lb_{selected_t_id}"
     
     if cache_key in cache and now < cache[cache_key]["next_fetch_allowed"]:
@@ -796,23 +846,13 @@ def fetch_smart_leaderboard(selected_t_id):
         tourney_data = raw_results.get('tournament', {})
         live_details = tourney_data.get('live_details', {})
         
-        t_status = normalize_pga_status(live_details.get('status', ''))
+        state = derive_tournament_state(lb_data, live_details)
+        current_r = state['current_r']
+        t_status = state['t_status']
         
-        api_curr_r = safe_int(live_details.get('current_round', 0))
-        player_curr_r = max([safe_int(p.get('current_round', 0)) for p in lb_data] + [0])
-        current_r = max(api_curr_r, player_curr_r)
-        
-        players_in_curr_round = [p for p in lb_data if safe_int(p.get('current_round', 0)) == current_r and normalize_pga_status(p.get('status', '')) not in ['cut', 'wd', 'dq']]
-        
-        has_started_curr = any(safe_int(p.get('holes_played', 0)) > 0 or normalize_pga_status(p.get('status', '')) in ['active', 'completed'] for p in players_in_curr_round)
-        
-        if not has_started_curr and current_r > 1 and t_status != 'completed':
-            current_r -= 1
-            t_status = 'endofday'
+        if live_details.get('status'):
             live_details['current_round'] = current_r
             live_details['status'] = t_status
-        else:
-            live_details['current_round'] = current_r
         
         for p in lb_data:
             stt = normalize_pga_status(p.get('status', ''))
@@ -827,8 +867,7 @@ def fetch_smart_leaderboard(selected_t_id):
         try:
             tourney_tz_str = tourney_data.get('timezone') or 'America/New_York'
             tourney_tz = pytz.timezone(tourney_tz_str)
-            now_utc = datetime.datetime.now(pytz.utc) # UTC aware 
-            now_tourney = now_utc.astimezone(tourney_tz)
+            now_tourney = now.astimezone(tourney_tz)
             
             target_r = current_r if current_r > 0 else 1
             min_tt_str, max_tt_str = "23:59", "00:00"
@@ -920,16 +959,10 @@ def fetch_smart_leaderboard(selected_t_id):
         if backup_data and backup_data.get('results'):
             lb_data = backup_data.get('results', {}).get('leaderboard', [])
             live_details = backup_data.get('results', {}).get('tournament', {}).get('live_details', {})
-            t_status = normalize_pga_status(live_details.get('status', ''))
-            current_r = live_details.get('current_round') or max([safe_int(p.get('current_round', 0)) for p in lb_data] + [0])
             
-            players_in_curr_round = [p for p in lb_data if safe_int(p.get('current_round', 0)) == current_r and normalize_pga_status(p.get('status', '')) not in ['cut', 'wd', 'dq']]
-            has_started_curr = any(safe_int(p.get('holes_played', 0)) > 0 or normalize_pga_status(p.get('status', '')) == 'active' for p in players_in_curr_round)
-            if not has_started_curr and current_r > 1 and t_status != 'completed':
-                current_r -= 1
-                t_status = 'endofday'
-                live_details['current_round'] = current_r
-                live_details['status'] = t_status
+            state = derive_tournament_state(lb_data, live_details)
+            current_r = state['current_r']
+            t_status = state['t_status']
             
             for p in lb_data:
                 stt = normalize_pga_status(p.get('status', ''))
@@ -1082,62 +1115,14 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
         tourney_data = raw_results.get('tournament') or {}
         live_details = tourney_data.get('live_details') or {}
         
-        t_status = normalize_pga_status(live_details.get('status', ''))
-        
-        api_curr_r = safe_int(live_details.get('current_round', 0))
-        player_curr_r = max([safe_int(p.get('current_round', 0)) for p in lb_data] + [0])
-        current_r = max(api_curr_r, player_curr_r)
-            
-        active_field = [p for p in lb_data if normalize_pga_status(p.get('status', '')) == 'active']
-        not_started_current = [p for p in lb_data if normalize_pga_status(p.get('status', '')) == 'pre' and safe_int(p.get('current_round', 0)) == current_r]
-        total_holes_live = sum(safe_int(p.get('holes_played', 0)) for p in lb_data)
-        
-        if t_status in ['completed', 'endofday']:
-            is_round_finished_consensus = True
-        elif active_field and all(safe_int(p.get('holes_played', 0)) == 18 for p in active_field):
-            is_round_finished_consensus = True
-        elif t_status == 'active' and not active_field and not not_started_current:
-            is_round_finished_consensus = True
-        elif t_status == 'active' and total_holes_live == 0:
-            is_round_finished_consensus = True
-        else:
-            is_round_finished_consensus = False
-            
-        active_holes = [safe_int(p.get('holes_played', 0)) for p in active_field]
-        
-        last_group_teed_off = False
-        last_group_htr = 0
-        is_r4_fully_done = False
-        
-        if not active_holes:
-            if any(normalize_pga_status(p.get('status', '')) == 'completed' for p in lb_data):
-                last_group_teed_off = True
-                last_group_htr = 18
-                if current_r == 4: is_r4_fully_done = True
-            else:
-                last_group_teed_off = False
-        else:
-            min_hp = min(active_holes)
-            if min_hp == 0: 
-                last_group_teed_off = False
-                last_group_htr = 0
-            else:
-                last_group_htr = min_hp
-                last_group_teed_off = True
-
-        cache = get_api_cache()
-        lb_key = f"lb_{t_id}"
-        cache_mode = cache[lb_key].get("mode", "") if lb_key in cache else ""
-        is_r4_live_mode = "R4 Live Scoring" in cache_mode
-
-        if is_admin_view:
-            sweep_max_round = current_r
-        else:
-            if current_r == 4:
-                if is_r4_live_mode or last_group_teed_off: sweep_max_round = 4
-                else: sweep_max_round = 3
-            elif is_round_finished_consensus: sweep_max_round = current_r
-            else: sweep_max_round = current_r - 1
+        state = derive_tournament_state(lb_data, live_details, is_r4_live_mode=False, is_admin_view=is_admin_view)
+        t_status = state['t_status']
+        current_r = state['current_r']
+        sweep_max_round = state['sweep_max_round']
+        is_round_finished_consensus = state['is_round_finished_consensus']
+        last_group_teed_off = state['last_group_teed_off']
+        last_group_htr = state['last_group_htr']
+        is_r4_fully_done = state['is_r4_fully_done']
             
         p_info = {}
         dns_list = [n.strip().lower() for n in str(dns_input).split(",")] if dns_input else []
@@ -1206,9 +1191,6 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
         if sweep_max_round > 0:
             active_scores = [v['total'] for v in p_info_lower.values() if v['status'] in ['active', 'completed', 'cut', 'endofday', 'pre'] and v['total'] != 999]
             if active_scores: win_score = min(active_scores)
-            
-        if t_status not in ['completed', 'endofday', 'pre']:
-            if is_round_finished_consensus: t_status = 'completed' if current_r == 4 else 'endofday'
             
         hide_rank = (t_status == 'pre' or current_r == 0) or (current_r == 1 and t_status not in ['endofday', 'completed'])
         
@@ -1509,29 +1491,17 @@ def render_pga_leaderboard(lb_data, full_data, tourney_id, view_mode, par_overri
     live_details = tourney_data.get('live_details') or {}
     tourney_tz_str = tourney_data.get('timezone') or 'America/New_York'
     
-    api_curr_r = safe_int(live_details.get('current_round', 0))
-    player_curr_r = max([safe_int(p.get('current_round', 0)) for p in lb_data] + [0])
-    curr_r = max(api_curr_r, player_curr_r)
-    global_status = normalize_pga_status(live_details.get('status', ''))
+    state = derive_tournament_state(lb_data, live_details)
+    curr_r = state['current_r']
+    global_status = state['t_status']
     
     tz_choice = st.radio("Display Tee Times in:", ["🇬🇧 UK Time", "🇺🇸 US Eastern (ET)"], horizontal=True, key=f"tz_{tourney_id}_{view_mode}")
     target_tz = 'Europe/London' if "UK" in tz_choice else 'America/New_York'
 
-    active_field = [p for p in lb_data if normalize_pga_status(p.get('status', '')) == 'active']
-    not_started_current = [p for p in lb_data if normalize_pga_status(p.get('status', '')) == 'pre' and safe_int(p.get('current_round', 0)) == curr_r]
-    total_holes_live = sum(safe_int(p.get('holes_played', 0)) for p in lb_data)
-    
     if global_status == 'completed': completed_rounds = 4
     elif global_status == 'endofday': completed_rounds = curr_r
     else:
-        if active_field and all(safe_int(p.get('holes_played',0)) == 18 for p in active_field): 
-            completed_rounds = curr_r
-        elif global_status == 'active' and not active_field and not not_started_current:
-            completed_rounds = curr_r
-        elif global_status == 'active' and total_holes_live == 0:
-            completed_rounds = curr_r
-        else: 
-            completed_rounds = curr_r - 1
+        completed_rounds = curr_r if state['is_round_finished_consensus'] else curr_r - 1
             
     cache = get_api_cache()
     lb_key = f"lb_{tourney_id}"
@@ -1683,9 +1653,10 @@ if is_public:
         if reveal_time:
             reveal_time_str_ui = reveal_time.strftime('%a, %b %d at %I:%M %p')
             
-    now = datetime.datetime.now() # naive server time
-    is_accepting_entries = close_time and now < close_time 
-    is_pre_reveal = reveal_time and now < reveal_time
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    now_naive = datetime.datetime.now()
+    is_accepting_entries = close_time and now_naive < close_time 
+    is_pre_reveal = reveal_time and now_naive < reveal_time
     show_real = True 
     
     raw_rules = get_config(tid, 'rules', DEFAULT_RULES)
@@ -1726,30 +1697,24 @@ if is_public:
     valid_p = [p.split(" (Top 20")[0] for p in formatted_field]
     full_df, total_count = get_clean_entries(tid, True, valid_players=valid_p, dns_players=public_dns.split(","))
     
-    is_authenticated = False
     raw_token = st.query_params.get("magic_token")
     magic_token = raw_token[0] if isinstance(raw_token, list) else raw_token
-    auth_email_dec = ""
     
-    if magic_token:
+    if magic_token and not st.session_state.get(f"auth_email_{tid}"):
         try:
             sb = get_supabase()
-            now_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            now_str = now_utc.isoformat()
             
-            # Atomic consume: attempt to update ONLY if conditions are met, returning the updated row
             res = sb.table('magic_links') \
-                .update({'used_at': now_utc}) \
+                .update({'used_at': now_str}) \
                 .eq('token', str(magic_token)) \
                 .eq('tournament_id', str(tid)) \
                 .is_('used_at', 'null') \
-                .gte('expires_at', now_utc) \
+                .gte('expires_at', now_str) \
                 .execute()
             
             if res.data and len(res.data) > 0:
-                auth_record = res.data[0]
-                auth_email_dec = auth_record.get('email', '')
-                is_authenticated = True
-                
+                st.session_state[f"auth_email_{tid}"] = res.data[0].get('email', '')
                 st.html("""
                     <script>
                     let attempts = 0;
@@ -1772,7 +1737,10 @@ if is_public:
             else:
                 st.error("🚨 This secure edit link has expired, been used, or is invalid. Please request a new one.")
         except Exception as e:
-            st.session_state.setdefault("api_log", []).append(f"Magic Link Error UI (token {magic_token}): {type(e).__name__} - {e}")
+            st.session_state.setdefault("api_log", []).append(f"Magic Link Error UI: {type(e).__name__}")
+
+    auth_email_dec = st.session_state.get(f"auth_email_{tid}", "")
+    is_authenticated = bool(auth_email_dec)
 
     current_tab = 0
     
@@ -1895,11 +1863,19 @@ if is_public:
                                 st.rerun()
                             
                             st.session_state[f"last_sub_{tid}"] = sub_sig
-                            ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                             final_payment = form_payment
                             
                             with st.spinner("Locking in your team..."):
-                                if append_entry_to_sheet(tid, [ts, form_name, form_email, final_payment, form_tie, p1, p2, p3, p4, p5]):
+                                payload = {
+                                    'name': form_name, 'email': form_email, 'payment_method': final_payment,
+                                    'tie_breaker': form_tie, 'picks': clean_picks
+                                }
+                                status = append_entry_to_sheet(tid, payload)
+                                
+                                if status == "DUPLICATE":
+                                    st.warning("⚠️ You have already submitted this exact team. We won't record a duplicate.")
+                                    st.session_state[f"last_sub_{tid}"] = None
+                                elif status is True:
                                     log_to_sheet("NEW ENTRY", f"Team submitted by {form_name}")
                                     send_confirmation_email(form_email, form_name, clean_picks, form_tie, final_payment, tnm, tid, is_edit=False, close_time_str=close_time_str_email, logo_url=public_logo)
                                     st.session_state[f"success_{tid}"] = True
@@ -1957,11 +1933,14 @@ if is_public:
                                 st.rerun()
                                 
                             st.session_state[f"last_upd_{tid}"] = sub_sig
-                            ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                             final_edit_payment = edit_payment
                             
                             with st.spinner("Updating your team..."):
-                                if update_specific_entry(tid, row_data['Sheet_Row'], [ts, edit_name, edit_email, final_edit_payment, edit_tie, ep1, ep2, ep3, ep4, ep5]):
+                                payload = {
+                                    'name': edit_name, 'email': edit_email, 'payment_method': final_edit_payment,
+                                    'tie_breaker': edit_tie, 'picks': clean_picks
+                                }
+                                if update_specific_entry(tid, row_data['Sheet_Row'], payload):
                                     log_to_sheet("ENTRY UPDATED", f"Team updated by {edit_name}")
                                     send_confirmation_email(edit_email, edit_name, clean_picks, edit_tie, final_edit_payment, tnm, tid, is_edit=True, close_time_str=close_time_str_email, logo_url=public_logo)
                                     st.session_state["editing_row"] = None
@@ -1991,6 +1970,9 @@ if is_public:
                     if is_authenticated:
                         st.success("✅ **Secure link verified!** You may now edit your team directly.")
                         email_input = auth_email_dec
+                        if st.button("🔒 Logout of secure session"):
+                            st.session_state[f"auth_email_{tid}"] = ""
+                            st.rerun()
                     else:
                         email_input = st.text_input("Email Address:", placeholder="e.g., name@example.com")
                     
@@ -2147,8 +2129,10 @@ else:
                     del st.query_params["token"]
                 st.rerun()
         
-        ak = st.secrets.get("api_keys", [k for k in st.secrets.keys() if "api" in k.lower() and "key" in k.lower() and "supabase" not in k.lower()])
-        if not ak: st.error("No API keys found in secrets!"); st.stop()
+        ak = st.secrets.get("api_keys")
+        if not ak or not isinstance(ak, list): 
+            st.error("No explicit `api_keys` array found in secrets!")
+            st.stop()
             
         active = st.selectbox("API Key", ak, index=ak.index(settings.get("active_api_key", ak[0])) if settings.get("active_api_key") in ak else 0)
         st.caption(f"📊 **Quota:** {settings.get(f'quota_{active}', 'Checking (Will update on next API pull)...')}")
@@ -2269,8 +2253,8 @@ else:
             
             st.markdown("---")
             st.write("⏳ **Entries Close Time**")
-            try: default_close_dt = datetime.datetime.strptime(str(t_start), "%Y-%m-%d %H:%M:%S").replace(hour=5, minute=0, second=0) if t_start else datetime.datetime.now()
-            except (ValueError, TypeError): default_close_dt = datetime.datetime.now()
+            try: default_close_dt = datetime.datetime.strptime(str(t_start), "%Y-%m-%d %H:%M:%S").replace(hour=5, minute=0, second=0) if t_start else datetime.datetime.now(datetime.timezone.utc)
+            except (ValueError, TypeError): default_close_dt = datetime.datetime.now(datetime.timezone.utc)
             
             db_close_admin = fetch_close_time_from_db(t_id)
             try: current_close_dt = datetime.datetime.strptime(db_close_admin, "%Y-%m-%d %H:%M:%S") if db_close_admin else default_close_dt
@@ -2281,8 +2265,8 @@ else:
             with c_t2: close_t = st.time_input("Close Time", value=current_close_dt.time())
             
             st.write("🔒 **Public Reveal Time**")
-            try: default_reveal_dt = datetime.datetime.strptime(str(t_start), "%Y-%m-%d %H:%M:%S").replace(hour=5, minute=0, second=0) if t_start else datetime.datetime.now()
-            except (ValueError, TypeError): default_reveal_dt = datetime.datetime.now()
+            try: default_reveal_dt = datetime.datetime.strptime(str(t_start), "%Y-%m-%d %H:%M:%S").replace(hour=5, minute=0, second=0) if t_start else datetime.datetime.now(datetime.timezone.utc)
+            except (ValueError, TypeError): default_reveal_dt = datetime.datetime.now(datetime.timezone.utc)
             
             db_reveal_admin = fetch_reveal_time_from_db(t_id)
             try: current_reveal_dt = datetime.datetime.strptime(db_reveal_admin, "%Y-%m-%d %H:%M:%S") if db_reveal_admin else default_reveal_dt
@@ -2701,8 +2685,8 @@ else:
                         
                         if st.button("🚀 Send Alert Emails", type="primary"):
                             with st.spinner("Sending emails..."):
-                                try: current_close_dt = datetime.datetime.strptime(settings.get(f"close_time_{t_id}"), "%Y-%m-%d %H:%M:%S") if settings.get(f"close_time_{t_id}") else datetime.datetime.now()
-                                except (ValueError, TypeError): current_close_dt = datetime.datetime.now() # naive
+                                try: current_close_dt = datetime.datetime.strptime(settings.get(f"close_time_{t_id}"), "%Y-%m-%d %H:%M:%S") if settings.get(f"close_time_{t_id}") else datetime.datetime.now(datetime.timezone.utc)
+                                except (ValueError, TypeError): current_close_dt = datetime.datetime.now(datetime.timezone.utc)
                                 
                                 try:
                                     uk_tz = pytz.timezone('Europe/London'); et_tz = pytz.timezone('America/New_York')
