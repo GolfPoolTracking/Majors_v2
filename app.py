@@ -401,6 +401,9 @@ def get_raw_sheet_data(t_id):
         else:
             for i in range(5): df[f'Pick {i+1}'] = ""
             
+        # 🚨 Fix: Drop backend Supabase view artifacts so they don't surface in Streamlit tables
+        df = df.drop(columns=['picks', 'tournament_id'], errors='ignore')
+            
         return df.copy()
     except Exception as e:
         st.session_state.setdefault("api_log", []).append(f"DB Read Error in get_raw_sheet_data (tournament_standings view): {e}")
