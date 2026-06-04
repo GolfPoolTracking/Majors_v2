@@ -1,4 +1,5 @@
 import streamlit as st, pandas as pd, requests, re, datetime, smtplib, pytz, json, html, urllib.parse, secrets
+import altair as alt
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.utils import formataddr
