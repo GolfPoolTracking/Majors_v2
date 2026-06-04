@@ -1,5 +1,4 @@
 import streamlit as st, pandas as pd, requests, re, datetime, smtplib, pytz, json, html, urllib.parse, secrets
-import altair as alt
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.utils import formataddr
@@ -65,7 +64,8 @@ def get_settings_cache(): return {}
 def safe_url(url):
     if not url: return ""
     u = str(url).strip()
-    if u.lower().startswith("javascript:"): return ""
+    if not u.lower().startswith(("http://", "https://")):
+        return ""
     return html.escape(u)
 
 def normalize_pga_status(stt):
@@ -251,7 +251,7 @@ def derive_tournament_state(lb_data, live_details, is_r4_live_mode=False, is_adm
         is_round_finished_consensus = True
     elif t_status == 'active' and not active_field and not not_started_current:
         is_round_finished_consensus = True
-    elif t_status == 'active' and total_holes_live == 0:
+    elif t_status == 'active' and total_holes_live == 0 and not active_field and not not_started_current:
         is_round_finished_consensus = True
 
     active_holes = [safe_int(p.get('holes_played', 0)) for p in active_field]
@@ -485,10 +485,12 @@ def send_field_change_email(user_email, name, removed_picks, added_to_field, t_n
         msg.attach(MIMEText(body_html, 'html'))
         
         server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()
-        server.login(sender, pwd)
-        server.send_message(msg) 
-        server.quit()
+        try:
+            server.starttls()
+            server.login(sender, pwd)
+            server.send_message(msg)
+        finally:
+            server.quit()
         return True
     except Exception as e: 
         st.session_state.setdefault("api_log", []).append(f"Email Error in send_field_change_email: {type(e).__name__} - {e}")
@@ -542,10 +544,12 @@ def send_confirmation_email(user_email, name, picks, tie_breaker, payment, t_nam
         msg['Bcc'] = sender 
         
         server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()
-        server.login(sender, pwd)
-        server.send_message(msg) 
-        server.quit()
+        try:
+            server.starttls()
+            server.login(sender, pwd)
+            server.send_message(msg)
+        finally:
+            server.quit()
         return True
     except Exception as e: 
         st.session_state.setdefault("api_log", []).append(f"Email Error in send_confirmation_email: {type(e).__name__} - {e}")
@@ -584,10 +588,12 @@ def send_magic_link_email(user_email, t_name, t_id, logo_url=""):
         msg.attach(MIMEText(body_html, 'html'))
         
         server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()
-        server.login(sender, pwd)
-        server.send_message(msg) 
-        server.quit()
+        try:
+            server.starttls()
+            server.login(sender, pwd)
+            server.send_message(msg)
+        finally:
+            server.quit()
         return True
     except Exception as e: 
         st.session_state.setdefault("api_log", []).append(f"Email Error in send_magic_link_email: {type(e).__name__} - {e}")
@@ -598,6 +604,12 @@ def safe_entry_payload(t_id, payload_dict):
     picks = payload_dict.get('picks', [])
     if not isinstance(picks, list) or len(picks) != 5:
         raise ValueError("Invalid picks format or length. Expected list of 5.")
+    clean_picks = [str(p).strip() for p in picks]
+    if any(p == "" for p in clean_picks):
+        raise ValueError("One or more picks are blank.")
+    if len(set(p.lower() for p in clean_picks)) != 5:
+        raise ValueError("Duplicate picks detected in payload.")
+    picks = clean_picks
     
     return {
         'tournament_id': str(t_id),
@@ -719,10 +731,12 @@ def send_admin_api_alert(url, error_details):
         msg.attach(MIMEText(body, 'html'))
         
         server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()
-        server.login(sender, pwd)
-        server.send_message(msg) 
-        server.quit()
+        try:
+            server.starttls()
+            server.login(sender, pwd)
+            server.send_message(msg)
+        finally:
+            server.quit()
         
         settings["last_api_alert_time"] = now
         return True
@@ -768,7 +782,13 @@ def intelligent_api_call(url, trigger_reason="Unknown"):
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_fixture_list(tour_id, year):
     data = intelligent_api_call(f"https://golf-leaderboard-data.p.rapidapi.com/fixtures/{tour_id}/{year}", "Fixture Fetch")
-    if data: return {f"{f.get('name')} ({f.get('start_date')[:10]})": {"id": f.get('id'), "start": f.get('start_date')} for f in get_safe_api_results(data)}
+    if data:
+        result = {}
+        for f in get_safe_api_results(data):
+            start = f.get('start_date') or ''
+            label = f"{f.get('name', 'Unknown')} ({start[:10]})" if start else str(f.get('name', 'Unknown'))
+            result[label] = {"id": f.get('id'), "start": f.get('start_date')}
+        return result
     return {}
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -1115,6 +1135,21 @@ def get_clean_entries(t_id, public_mode, valid_players=[], dns_players=[], email
         st.session_state.setdefault("api_log", []).append(f"Error building UI entry grid: {type(e).__name__} - {e}")
         return pd.DataFrame(), 0
 
+
+def _parse_t_start(t_start):
+    """Safely parse a tournament start date that may be a datetime, a full
+    datetime string, or a date-only string, returning a datetime or None."""
+    if not t_start:
+        return None
+    if isinstance(t_start, datetime.datetime):
+        return t_start
+    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d'):
+        try:
+            return datetime.datetime.strptime(str(t_start), fmt)
+        except ValueError:
+            pass
+    return None
+
 def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", valid_players=None, logo_url=None, is_admin_download=False, header_only=False, is_admin_view=False, hide_title=False, search_query=""):
     try:
         lb_data, next_f, last_f, full_data, data_source = fetch_smart_leaderboard(t_id)
@@ -1208,7 +1243,8 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
             else:
                 status_txt = "All players finished: Final Result Being Checked!"
         elif t_status == 'pre':
-            status_txt = f"Waiting for R1 to start... ⏳ ({datetime.datetime.strptime(str(t_start), '%Y-%m-%d %H:%M:%S').strftime('%d %b %y')})" if t_start else "Waiting for R1 to start... ⏳"
+            _dt = _parse_t_start(t_start)
+            status_txt = f"Waiting for R1 to start... ⏳ ({_dt.strftime('%d %b %y')})" if _dt else "Waiting for R1 to start... ⏳"
         elif t_status == 'suspended':
             status_txt = f"Play Suspended (R{current_r})"
         elif t_status == 'endofday':
@@ -1917,8 +1953,7 @@ if is_public:
                         safe_idx = pay_opts.index(row_data['Payment']) if row_data['Payment'] in pay_opts else 0
                         edit_payment = st.selectbox("Payment Method *", pay_opts, index=safe_idx)
                     
-                    c_submit, c_cancel = st.columns([1, 4])
-                    with c_submit: update_submitted = st.form_submit_button("Update Team", type="primary")
+                    update_submitted = st.form_submit_button("Update Team", type="primary")
                     
                     if update_submitted:
                         new_picks = [ep1, ep2, ep3, ep4, ep5]; clean_picks = [p for p in new_picks if p != ""]
@@ -2261,7 +2296,7 @@ else:
             
             st.markdown("---")
             st.write("⏳ **Entries Close Time**")
-            try: default_close_dt = datetime.datetime.strptime(str(t_start), "%Y-%m-%d %H:%M:%S").replace(hour=5, minute=0, second=0) if t_start else datetime.datetime.now(datetime.timezone.utc)
+            try: default_close_dt = (_parse_t_start(t_start).replace(hour=5, minute=0, second=0) if _parse_t_start(t_start) else datetime.datetime.now(datetime.timezone.utc))
             except (ValueError, TypeError): default_close_dt = datetime.datetime.now(datetime.timezone.utc)
             
             db_close_admin = fetch_close_time_from_db(t_id)
@@ -2273,7 +2308,7 @@ else:
             with c_t2: close_t = st.time_input("Close Time", value=current_close_dt.time())
             
             st.write("🔒 **Public Reveal Time**")
-            try: default_reveal_dt = datetime.datetime.strptime(str(t_start), "%Y-%m-%d %H:%M:%S").replace(hour=5, minute=0, second=0) if t_start else datetime.datetime.now(datetime.timezone.utc)
+            try: default_reveal_dt = (_parse_t_start(t_start).replace(hour=5, minute=0, second=0) if _parse_t_start(t_start) else datetime.datetime.now(datetime.timezone.utc))
             except (ValueError, TypeError): default_reveal_dt = datetime.datetime.now(datetime.timezone.utc)
             
             db_reveal_admin = fetch_reveal_time_from_db(t_id)
