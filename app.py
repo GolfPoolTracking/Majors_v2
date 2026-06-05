@@ -42,12 +42,16 @@ if "editing_row" not in st.session_state: st.session_state["editing_row"] = None
 is_public = st.query_params.get("view") == "public"
 target_tourney_id = st.query_params.get("tourney_id")
 
+# Intelligently locate the password whether it's at the root or nested
 if "admin_password" in st.secrets:
     ADMIN_PASSWORD = st.secrets["admin_password"]
+elif "supabase" in st.secrets and "admin_password" in st.secrets["supabase"]:
+    ADMIN_PASSWORD = st.secrets["supabase"]["admin_password"]
 else:
     if not is_public:
-        st.error("🚨 Configuration Error: `admin_password` is missing from Streamlit Secrets.")
+        st.error("🚨 Configuration Error: `admin_password` is missing. (Check that it isn't accidentally nested under a [section] in your secrets.toml!)")
         st.stop()
+    ADMIN_PASSWORD = "" # Prevents NameError in public views
 
 BASE_URL = "https://majors-test.streamlit.app/"
 DEFAULT_RULES = """### 🏆 Tournament Rules\n\n⛳ **The Team:** Pick **5** players, max **2** from Top 20.\n\n🏌️‍♂️ **Scoring:** The **best 4 scores** each day count.\n\n✂️ **The Cut:** If **2 or more** picks miss the cut, team is out.\n\n⚖️ **Tie Break:** Predict Winner's total score to par.\n\n⏳ **Deadline:** Midnight before the tournament.\n\n💰 **Entry Fee:** **$30**."""
