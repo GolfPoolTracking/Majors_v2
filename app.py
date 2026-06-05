@@ -908,7 +908,11 @@ def fetch_smart_leaderboard(selected_t_id):
             tourney_tz = pytz.timezone(tourney_tz_str)
             now_tourney = now.astimezone(tourney_tz)
             
+            # 🚨 FIX: Target the NEXT round if the current one is finished
             target_r = current_r if current_r > 0 else 1
+            if t_status == 'endofday' and current_r < 4:
+                target_r = current_r + 1
+                
             min_tt_str, max_tt_str = "23:59", "00:00"
             min_tt_date, max_tt_date = None, None
             
@@ -930,7 +934,7 @@ def fetch_smart_leaderboard(selected_t_id):
             if t_status == 'completed':
                 next_fetch = now + datetime.timedelta(minutes=1440)
                 mode = "🏁 Finished (24h)"
-            elif t_status in ['suspended', 'endofday']:
+            elif t_status == 'suspended': # 🚨 FIX: Removed 'endofday' from the 1h hardcode
                 next_fetch = now + datetime.timedelta(minutes=60)
                 mode = f"⏸️ {t_status.title()} (1h)"
             elif not has_tee_times:
@@ -951,7 +955,8 @@ def fetch_smart_leaderboard(selected_t_id):
                     max_tt_parts = max_tt_str.split(':')
                     first_tt_dt = now_tourney.replace(hour=int(min_tt_parts[0]), minute=int(min_tt_parts[1]), second=0, microsecond=0)
                     last_tt_dt = now_tourney.replace(hour=int(max_tt_parts[0]), minute=int(max_tt_parts[1]), second=0, microsecond=0)
-                    if t_status == 'pre' and first_tt_dt < now_tourney:
+                    # 🚨 FIX: Defensively bump the day if endofday fallback triggers
+                    if t_status in ['pre', 'endofday'] and first_tt_dt < now_tourney:
                         first_tt_dt += datetime.timedelta(days=1)
                         last_tt_dt += datetime.timedelta(days=1)
 
