@@ -42,7 +42,7 @@ if "editing_row" not in st.session_state: st.session_state["editing_row"] = None
 is_public = st.query_params.get("view") == "public"
 target_tourney_id = st.query_params.get("tourney_id")
 
-# Intelligently locate the password whether it's at the root or nested
+# Smarter TOML locator for nested secrets
 if "admin_password" in st.secrets:
     ADMIN_PASSWORD = st.secrets["admin_password"]
 elif "supabase" in st.secrets and "admin_password" in st.secrets["supabase"]:
@@ -51,7 +51,7 @@ else:
     if not is_public:
         st.error("🚨 Configuration Error: `admin_password` is missing. (Check that it isn't accidentally nested under a [section] in your secrets.toml!)")
         st.stop()
-    ADMIN_PASSWORD = "" # Prevents NameError in public views
+    ADMIN_PASSWORD = ""
 
 BASE_URL = "https://majors-test.streamlit.app/"
 DEFAULT_RULES = """### 🏆 Tournament Rules\n\n⛳ **The Team:** Pick **5** players, max **2** from Top 20.\n\n🏌️‍♂️ **Scoring:** The **best 4 scores** each day count.\n\n✂️ **The Cut:** If **2 or more** picks miss the cut, team is out.\n\n⚖️ **Tie Break:** Predict Winner's total score to par.\n\n⏳ **Deadline:** Midnight before the tournament.\n\n💰 **Entry Fee:** **$30**."""
@@ -239,7 +239,6 @@ def get_dropdown_index(clean_name, fmt_list):
 
 # --- STATE INFERENCE & DATA HELPERS ---
 def derive_tournament_state(lb_data, live_details, is_r4_live_mode=False, is_admin_view=False):
-    """Centralized tournament state and round calculation."""
     t_status = normalize_pga_status(live_details.get('status', ''))
     api_curr_r = safe_int(live_details.get('current_round', 0))
     player_curr_r = max([safe_int(p.get('current_round', 0)) for p in lb_data] + [0])
@@ -639,9 +638,6 @@ def append_entry_to_sheet(t_id, payload):
             new_picks = set(payload.get('picks', []))
             for r in existing.data:
                 old_picks = set([str(r.get(f'pick_{i}', '')) for i in range(1,6)])
-                # INTENTIONAL: only block identical pick sets from the same email.
-                # Multiple teams per email with different picks are allowed by design
-                # (see (Team 2) rendering logic in get_clean_entries).
                 if new_picks == old_picks:
                     st.session_state.setdefault("api_log", []).append(f"Duplicate block hit for {clean_email}")
                     return "DUPLICATE"
@@ -754,12 +750,16 @@ def send_admin_api_alert(url, error_details):
 
 def intelligent_api_call(url, trigger_reason="Unknown"):
     settings = get_settings_cache()
-    # Explicit Canonical Config Priority (No broad scanning)
+    
+    # Explicit Canonical Config Priority OR Legacy Scanning
     all_keys = st.secrets.get("api_keys")
     if not all_keys or not isinstance(all_keys, list):
-        log_to_sheet("API CRITICAL", "api_keys list missing from secrets.toml")
-        return None 
-        
+        # Fallback to legacy scanning if explicit array is missing
+        all_keys = [k for k in st.secrets.keys() if "api" in k.lower() and "key" in k.lower() and "supabase" not in k.lower()]
+        if not all_keys:
+            log_to_sheet("API CRITICAL", "No API keys found in secrets.toml")
+            return None 
+            
     current_active = settings.get("active_api_key", all_keys[0])
     last_error = "Unknown Error"
     
@@ -1145,8 +1145,6 @@ def get_clean_entries(t_id, public_mode, valid_players=[], dns_players=[], email
 
 
 def _parse_t_start(t_start):
-    """Safely parse a tournament start date that may be a datetime, a full
-    datetime string, or a date-only string, returning a datetime or None."""
     if not t_start:
         return None
     if isinstance(t_start, datetime.datetime):
@@ -1707,8 +1705,6 @@ if is_public:
             
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     # Use UTC-aware comparison so the deadline is correct regardless of server timezone.
-    # close_time and reveal_time are naive (stored without tz) — treat them as UTC
-    # to match the UTC-aware now_utc used everywhere else in the app.
     _now_for_check = datetime.datetime.now(datetime.timezone.utc)
     def _naive_to_utc(dt):
         if dt is None: return None
@@ -2189,8 +2185,12 @@ else:
         
         ak = st.secrets.get("api_keys")
         if not ak or not isinstance(ak, list): 
-            st.error("No explicit `api_keys` array found in secrets!")
-            st.stop()
+            ak = [k for k in st.secrets.keys() if "api" in k.lower() and "key" in k.lower() and "supabase" not in k.lower()]
+            if not ak:
+                st.error("No API keys found in secrets!")
+                st.stop()
+            else:
+                st.warning("⚠️ Using legacy API key scanning. It is recommended to define `api_keys = ['key1']` in your secrets.")
             
         active = st.selectbox("API Key", ak, index=ak.index(settings.get("active_api_key", ak[0])) if settings.get("active_api_key") in ak else 0)
         st.caption(f"📊 **Quota:** {settings.get(f'quota_{active}', 'Checking (Will update on next API pull)...')}")
