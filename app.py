@@ -190,20 +190,6 @@ def get_pga_thru(p, curr_r, completed_rounds, is_live_scoring_active, tourney_tz
     if is_live_scoring_active and stt == 'active':
         if hp >= 18: return 'F'
         if hp > 0: return str(hp)
-        
-    target_r = curr_r if is_live_scoring_active else completed_rounds + 1
-    if target_r > 4: return "-"
-    
-    if hide_tt: 
-        return "Waiting..." if stt == 'active' else "-"
-    
-    for rd in p.get('rounds', []):
-        if safe_int(rd.get('round_number', 0)) == target_r:
-            tt = rd.get('tee_time_local', '')
-            r_date = rd.get('date')
-            return format_tee_time(tt, tourney_tz_str, target_tz_str, r_date)
-            
-    if stt == 'active': return "Waiting for tee times..."
     return "-"
 
 def golf_fmt(x): return "-" if pd.isna(x) or x == 999 else "E" if x == 0 else f"+{int(x)}" if x > 0 else str(int(x))
@@ -239,14 +225,16 @@ def get_dropdown_index(clean_name, fmt_list):
 
 # --- STATE INFERENCE & DATA HELPERS ---
 def derive_tournament_state(lb_data, live_details, is_r4_live_mode=False, is_admin_view=False):
+    """Centralized tournament state and round calculation."""
     t_status = normalize_pga_status(live_details.get('status', ''))
     api_curr_r = safe_int(live_details.get('current_round', 0))
     player_curr_r = max([safe_int(p.get('current_round', 0)) for p in lb_data] + [0])
     current_r = max(api_curr_r, player_curr_r)
     
-    # 🚨 Fix: Track anyone still on the course or waiting to tee off
     unfinished_players = [p for p in lb_data if safe_int(p.get('current_round', 0)) == current_r and normalize_pga_status(p.get('status', '')) not in ['completed', 'cut', 'wd', 'dq']]
     active_field = [p for p in lb_data if normalize_pga_status(p.get('status', '')) == 'active']
+    not_started_current = [p for p in lb_data if normalize_pga_status(p.get('status', '')) == 'pre' and safe_int(p.get('current_round', 0)) == current_r]
+    total_holes_live = sum(safe_int(p.get('holes_played', 0)) for p in lb_data)
     
     is_round_finished_consensus = False
     if t_status in ['completed', 'endofday']:
@@ -255,8 +243,11 @@ def derive_tournament_state(lb_data, live_details, is_r4_live_mode=False, is_adm
         is_round_finished_consensus = True
     elif active_field and all(safe_int(p.get('holes_played', 0)) == 18 for p in active_field):
         is_round_finished_consensus = True
+    elif t_status == 'active' and not active_field and not not_started_current:
+        is_round_finished_consensus = True
+    elif t_status == 'active' and total_holes_live == 0 and not active_field and not not_started_current:
+        is_round_finished_consensus = True
 
-    # 🚨 Fix: Force the API status forward if our logic detects everyone is done
     if is_round_finished_consensus and t_status not in ['completed', 'endofday', 'pre']:
         t_status = 'completed' if current_r == 4 else 'endofday'
 
@@ -640,6 +631,9 @@ def append_entry_to_sheet(t_id, payload):
             new_picks = set(payload.get('picks', []))
             for r in existing.data:
                 old_picks = set([str(r.get(f'pick_{i}', '')) for i in range(1,6)])
+                # INTENTIONAL: only block identical pick sets from the same email.
+                # Multiple teams per email with different picks are allowed by design
+                # (see (Team 2) rendering logic in get_clean_entries).
                 if new_picks == old_picks:
                     st.session_state.setdefault("api_log", []).append(f"Duplicate block hit for {clean_email}")
                     return "DUPLICATE"
@@ -1070,9 +1064,7 @@ def render_roster_table(picks, p_info_lower, rounds_active, counting_map, is_liv
         if is_elim and r >= 3: tot_html += f"<td style='padding: 0 10px; border-top: 1px solid var(--border-color); padding-top: 8px;'><b style='color:red;'>CUT</b></td>"
         else:
             r_score = round_scores.get(r, 0)
-            if r_score < 0: r_col = "#e74c3c"
-            elif r_score == 0: r_col = "#2ecc71"
-            else: r_col = "var(--text-color)"
+            if r_col := "#e74c3c" if r_score < 0 else "#2ecc71" if r_score == 0 else "var(--text-color)": pass
             
             s_txt = f"<span style='color: {r_col};'>{format_score(r_score)}</span>" if current_r > 0 else "-"
             rank_display = round_ranks.get(r, '-') if (current_r > 0 and not hide_rank) else '-'
@@ -1145,19 +1137,6 @@ def get_clean_entries(t_id, public_mode, valid_players=[], dns_players=[], email
         st.session_state.setdefault("api_log", []).append(f"Error building UI entry grid: {type(e).__name__} - {e}")
         return pd.DataFrame(), 0
 
-
-def _parse_t_start(t_start):
-    if not t_start:
-        return None
-    if isinstance(t_start, datetime.datetime):
-        return t_start
-    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d'):
-        try:
-            return datetime.datetime.strptime(str(t_start), fmt)
-        except ValueError:
-            pass
-    return None
-
 def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", valid_players=None, logo_url=None, is_admin_download=False, header_only=False, is_admin_view=False, hide_title=False, search_query=""):
     try:
         lb_data, next_f, last_f, full_data, data_source = fetch_smart_leaderboard(t_id)
@@ -1170,7 +1149,6 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
         t_status = state['t_status']
         current_r = state['current_r']
         sweep_max_round = state['sweep_max_round']
-        is_round_finished_consensus = state['is_round_finished_consensus']
         last_group_teed_off = state['last_group_teed_off']
         last_group_htr = state['last_group_htr']
         is_r4_fully_done = state['is_r4_fully_done']
@@ -1364,7 +1342,7 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
                 r_sum = sum(int(x[1]) for x in top_4)
                 r_sc[r] = r_sum; running += r_sum; cum_sc[r] = running; total += r_sum
                 
-            cut_made = (current_r > 2) or (current_r == 2 and is_round_finished_consensus)
+            cut_made = (current_r > 2) or (current_r == 2 and state['is_round_finished_consensus'])
             elim = (cut_made and sum(1 for p in picks if p.lower() in p_info_lower and p_info_lower[p.lower()]['status'] not in ['cut','wd','dq']) < 4)
             
             t_val = extract_tie_breaker(row['Tie Breaker']) if 'Tie Breaker' in row else 0
@@ -1547,9 +1525,6 @@ def render_pga_leaderboard(lb_data, full_data, tourney_id, view_mode, par_overri
     curr_r = state['current_r']
     global_status = state['t_status']
     
-    tz_choice = st.radio("Display Tee Times in:", ["🇬🇧 UK Time", "🇺🇸 US Eastern (ET)"], horizontal=True, key=f"tz_{tourney_id}_{view_mode}")
-    target_tz = 'Europe/London' if "UK" in tz_choice else 'America/New_York'
-
     if global_status == 'completed': completed_rounds = 4
     elif global_status == 'endofday': completed_rounds = curr_r
     else:
@@ -1570,15 +1545,12 @@ def render_pga_leaderboard(lb_data, full_data, tourney_id, view_mode, par_overri
             max_visible_round = completed_rounds
             is_live_scoring_active = False
 
-    if completed_rounds == 4 or is_live_scoring_active: thru_header = "Thru"
-    else: thru_header = f"R{completed_rounds + 1} Tee Times"
-
     real_df = pd.DataFrame([{
         'Pos': str(p.get('position', '-')), 
         'Status': normalize_pga_status(p.get('status', '')),
         'Player': f"{p.get('first_name', '')} {p.get('last_name', '')}".strip(),
         'Total': get_pga_total_num(p, max_visible_round, par_override, is_live_scoring_active, curr_r),
-        'Thru': get_pga_thru(p, curr_r, completed_rounds, is_live_scoring_active, tourney_tz_str, target_tz, hide_tt),
+        'Thru': get_pga_thru(p, curr_r, completed_rounds, is_live_scoring_active, tourney_tz_str, 'UTC', hide_tt),
         'R1': format_pga_round_score(p, 0, max_visible_round, par_override, is_live_scoring_active, curr_r),
         'R2': format_pga_round_score(p, 1, max_visible_round, par_override, is_live_scoring_active, curr_r),
         'R3': format_pga_round_score(p, 2, max_visible_round, par_override, is_live_scoring_active, curr_r),
@@ -1606,7 +1578,7 @@ def render_pga_leaderboard(lb_data, full_data, tourney_id, view_mode, par_overri
         "Pos": st.column_config.TextColumn("Pos", width="small", pinned=True),
         "Player": st.column_config.TextColumn("Golfer", width="medium"),
         "Total": st.column_config.Column("Total", width="small"),
-        "Thru": st.column_config.TextColumn(thru_header, width="medium"),
+        "Thru": st.column_config.TextColumn("Thru", width="medium"),
         "R1": st.column_config.TextColumn("R1", width="small"),
         "R2": st.column_config.TextColumn("R2", width="small"),
         "R3": st.column_config.TextColumn("R3", width="small"),
@@ -1986,7 +1958,7 @@ if is_public:
                             if st.session_state.get(f"last_upd_{tid}") == sub_sig:
                                 st.session_state["editing_row"] = None
                                 st.session_state[f"edit_success_{tid}"] = True
-                                st.rerun()
+                                r.rerun()
                                 
                             st.session_state[f"last_upd_{tid}"] = sub_sig
                             final_edit_payment = edit_payment
@@ -2587,7 +2559,7 @@ else:
                     r_actual = st.number_input("Actual Revolut/Cash", value=float(saved_bals.get("r_act", 0.0)), step=10.0)
                     r_personal = st.number_input("Subtract Personal Money", value=float(saved_bals.get("r_per", 0.0)), step=10.0, key="r_pers")
                     r_net = r_actual - r_personal; r_diff = r_net - r_coll
-                    st.metric("Net Revolut/Cash", f"${r_net:,.2f}", delta=f"-${abs(r_diff):,.2f} vs App" if r_diff < 0 else f"+${r_diff:,.2f} vs App" if r_diff > 0 else "Matches App ✅", delta_color="inverse" if r_diff > 0 else "normal" if r_diff < 0 else "off")
+                    st.metric("Net Revolut/Cash", f"${r_net:,.2f}", delta=f"-${abs(p_diff):,.2f} vs App" if r_diff < 0 else f"+${r_diff:,.2f} vs App" if r_diff > 0 else "Matches App ✅", delta_color="inverse" if r_diff > 0 else "normal" if r_diff < 0 else "off")
                 
                 total_actual_bank = z_net + p_net + r_net; diff_bank_vs_app = total_actual_bank - total_collected
                 
