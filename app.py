@@ -893,6 +893,8 @@ def fetch_smart_leaderboard(selected_t_id):
         t_status = state['t_status']
         
         if live_details.get('status'):
+            if live_details is None:
+                live_details = {}
             live_details['current_round'] = current_r
             live_details['status'] = t_status
         
