@@ -234,6 +234,9 @@ def get_dropdown_index(clean_name, fmt_list):
 # --- STATE INFERENCE & DATA HELPERS ---
 def derive_tournament_state(lb_data, live_details, is_r4_live_mode=False, is_admin_view=False):
     """Centralized tournament state and round calculation."""
+    # Add this safety check right at the top of the function
+    if not live_details:
+        live_details = {}
     t_status = normalize_pga_status(live_details.get('status', ''))
     api_curr_r = safe_int(live_details.get('current_round', 0))
     player_curr_r = max([safe_int(p.get('current_round', 0)) for p in lb_data] + [0])
