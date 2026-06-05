@@ -1,4 +1,5 @@
 import streamlit as st, pandas as pd, requests, re, datetime, smtplib, pytz, json, hashlib, altair as alt, time
+import html, threading
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.utils import formataddr
@@ -35,7 +36,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-if "api_log" not in st.session_state: st.session_state["api_log"] = []
 if "editing_row" not in st.session_state: st.session_state["editing_row"] = None
 
 is_public = st.query_params.get("view") == "public"
@@ -69,7 +69,7 @@ def _cached_safe_int_string(s_val):
     clean = re.sub(r"[^0-9.-]", "", s_val)
     if not clean or clean == '-': return 0
     try: return int(float(clean))
-    except: return 0
+    except Exception: return 0
 
 def safe_int(val):
     if pd.isna(val): return 0
@@ -167,7 +167,7 @@ def get_pga_thru(p, curr_r, completed_rounds, is_live_scoring_active, tourney_tz
                 try:
                     dt_source = pytz.timezone(tourney_tz_str).localize(datetime.datetime.now().replace(hour=int(tt.split(':')[0]), minute=int(tt.split(':')[1]), second=0, microsecond=0))
                     return dt_source.astimezone(pytz.timezone(target_tz_str)).strftime('%H:%M')
-                except: return tt
+                except Exception: return tt
     if stt == 'active': return "Waiting for tee times..."
     return "-"
 
@@ -211,7 +211,7 @@ def get_config(t_id, column, default=""):
             return res.data[0].get(column) or default
         return default
     except Exception as e:
-        st.session_state.setdefault("api_log", []).append(f"DB Read Error ({column}): {e}")
+        print(f"DB Read Error ({column}): {e}")
         return default
 
 def update_config(t_id, column, value, t_name=None):
@@ -220,7 +220,6 @@ def update_config(t_id, column, value, t_name=None):
         existing = sb.table('tournament_configs').select('tournament_id').eq('tournament_id', str(t_id)).execute()
         
         update_data = {column: value}
-        # ONLY update the name if it is explicitly provided and not blank
         if t_name and str(t_name).strip(): 
             update_data['tournament_name'] = str(t_name).strip()
             
@@ -231,12 +230,10 @@ def update_config(t_id, column, value, t_name=None):
             sb.table('tournament_configs').insert(update_data).execute()
         return True
     except Exception as e:
-        st.session_state.setdefault("api_log", []).append(f"DB Write Error ({column}): {e}")
+        print(f"DB Write Error ({column}): {e}")
         return False
 
 def log_to_sheet(event_type, message):
-    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    st.session_state["api_log"].insert(0, f"[{ts}] {event_type}: {message}")
     try:
         t_id = st.session_state.get('current_t_id', 'General')
         get_supabase().table('app_logs').insert({
@@ -245,16 +242,14 @@ def log_to_sheet(event_type, message):
             'message': message
         }).execute()
     except Exception as e: 
-        st.session_state.setdefault("api_log", []).append(f"DB Error (log_to_db): {e}")
+        print(f"DB Error (log_to_db): {e}")
 
 def save_api_backup_to_sheet(t_id, full_data):
-    # Extract the official name straight from the RapidAPI payload
     t_name = ""
     try:
         t_name = full_data.get('results', {}).get('tournament', {}).get('name', '')
-    except:
+    except Exception:
         pass
-    
     return update_config(t_id, 'api_backup', full_data, t_name=t_name)
 
 def fetch_api_backup_from_sheet(t_id):
@@ -311,7 +306,7 @@ def save_fin_balances_to_sheet(t_id, json_str):
             fetch_fin_balances_from_sheet.clear()
             return True
         return False
-    except: return False
+    except Exception: return False
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_alerted_field_from_sheet(t_id):
@@ -326,7 +321,7 @@ def save_alerted_field_to_sheet(t_id, field_string):
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_par_from_sheet(t_id):
     try: return int(get_config(t_id, 'manual_par', 0))
-    except: return 0
+    except Exception: return 0
 
 def save_par_to_sheet(t_id, par_value):
     if update_config(t_id, 'manual_par', par_value):
@@ -376,38 +371,46 @@ def save_payout_config_to_sheet(t_id, json_str):
             fetch_payout_config_from_sheet.clear()
             return True
         return False
-    except: return False
+    except Exception: return False
 
 @st.cache_data(ttl=120, show_spinner=False)
 def get_raw_sheet_data(t_id):
     if not t_id: return pd.DataFrame()
     try:
-        # 🔥 SHIFT TO HIGH-PERFORMANCE SQL VIEW
         res = get_supabase().table('tournament_standings').select('*').eq('tournament_id', str(t_id)).order('entry_id').execute()
         if not res.data: return pd.DataFrame()
         
         df = pd.DataFrame(res.data)
         
-        # Map the View structure directly to what the rest of your Streamlit app expects
         df = df.rename(columns={
             'entry_id': 'Sheet_Row',
             'participant_name': 'Name',
-            'email': 'Email',                   # <-- NEW MAPPING
-            'payment_method': 'Payment Method', # <-- NEW MAPPING
+            'email': 'Email',
+            'payment_method': 'Payment Method',
             'tie_breaker': 'Tie Breaker',
             'paid': 'Paid'
         })
         
-        # Unpack the SQL Array back into Pick 1 -> Pick 5 for the Admin UI and Leaderboard logic
         if 'picks' in df.columns:
             for i in range(5):
                 df[f'Pick {i+1}'] = df['picks'].apply(lambda x: x[i] if isinstance(x, list) and len(x) > i else "")
             
         return df.copy()
     except Exception as e:
-        st.session_state.setdefault("api_log", []).append(f"DB Read Error (tournament_standings view): {e}")
+        print(f"DB Read Error (tournament_standings view): {e}")
         return pd.DataFrame()
-        
+
+# 🚨 BACKGROUND EMAIL SENDER 🚨
+def _send_email_async(msg, sender, pwd):
+    try:
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(sender, pwd)
+        server.send_message(msg) 
+        server.quit()
+    except Exception as e:
+        print(f"Async Email Error: {e}")
+
 def send_field_change_email(user_email, name, removed_picks, added_to_field, t_name, t_id, close_time_str, logo_url):
     sender, pwd = st.secrets.get("email_sender"), st.secrets.get("email_password")
     if not sender or not pwd: return False
@@ -424,7 +427,7 @@ def send_field_change_email(user_email, name, removed_picks, added_to_field, t_n
         
         if removed_picks:
             subject = f"{t_name} - 🚨 URGENT: Action Required for your Team"
-            p_html = "".join([f"<li style='padding: 4px 0;'><b>{p}</b></li>" for p in removed_picks])
+            p_html = "".join([f"<li style='padding: 4px 0;'><b>{html.escape(p)}</b></li>" for p in removed_picks])
             blocks.append(f"""
             <div style="background-color: #fff3e0; border-left: 4px solid #e67e22; padding: 15px 20px; border-radius: 4px; margin: 20px 0;">
                 <h3 style="margin-top:0; color: #d35400; font-size: 18px;">🚨 Player(s) Withdrawn</h3>
@@ -435,7 +438,7 @@ def send_field_change_email(user_email, name, removed_picks, added_to_field, t_n
             """)
             
         if added_to_field:
-            p_html = "".join([f"<li>{p}</li>" for p in added_to_field])
+            p_html = "".join([f"<li>{html.escape(p)}</li>" for p in added_to_field])
             blocks.append(f"""
             <div style="background-color: #e8f8f5; border-left: 4px solid #1abc9c; padding: 15px 20px; border-radius: 4px; margin: 20px 0;">
                 <h3 style="margin-top:0; color: #16a085; font-size: 18px;">⛳ New Players Added</h3>
@@ -448,7 +451,7 @@ def send_field_change_email(user_email, name, removed_picks, added_to_field, t_n
         <html>
           <body style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #2c3e50; line-height: 1.6; max-width: 600px; margin: 0 auto; padding: 20px;">
             {logo_html}
-            <p style="font-size: 16px;">Hi <b>{name}</b>,</p>
+            <p style="font-size: 16px;">Hi <b>{html.escape(name)}</b>,</p>
             {"".join(blocks)}
             
             <div style="text-align: center; margin-top: 35px; margin-bottom: 20px;">
@@ -460,14 +463,10 @@ def send_field_change_email(user_email, name, removed_picks, added_to_field, t_n
         msg['Subject'] = subject
         msg.attach(MIMEText(body, 'html'))
         
-        server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()
-        server.login(sender, pwd)
-        server.send_message(msg) 
-        server.quit()
+        threading.Thread(target=_send_email_async, args=(msg, sender, pwd)).start()
         return True
     except Exception as e: 
-        st.session_state.setdefault("api_log", []).append(f"Email Error (send_field_change): {e}")
+        print(f"Email Error (send_field_change): {e}")
         return False
 
 def generate_short_link(long_url):
@@ -476,7 +475,7 @@ def generate_short_link(long_url):
         resp = requests.get(f"https://is.gd/create.php?format=simple&url={urllib.parse.quote(long_url)}", timeout=5)
         if resp.status_code == 200 and "is.gd" in resp.text: return resp.text.strip()
     except Exception as e: 
-        st.session_state.setdefault("api_log", []).append(f"URL Shortener Error: {e}")
+        print(f"URL Shortener Error: {e}")
     return None
 
 def send_confirmation_email(user_email, name, picks, tie_breaker, payment, t_name, t_id, is_edit=False, close_time_str="", logo_url=""):
@@ -489,7 +488,7 @@ def send_confirmation_email(user_email, name, picks, tie_breaker, payment, t_nam
         status_word = "UPDATED" if is_edit else "LOCKED IN"
         msg['Subject'] = f"{t_name} - ⛳ Your Team is {status_word}"
         
-        p_html = "".join([f"<li style='padding: 4px 0;'><b>{p}</b></li>" for p in picks])
+        p_html = "".join([f"<li style='padding: 4px 0;'><b>{html.escape(p)}</b></li>" for p in picks])
         public_link = f"{BASE_URL}?view=public&tourney_id={t_id}"
         
         edit_notice = f"<p style='color: #e67e22; font-size: 14px; background-color: #fff3e0; padding: 10px; border-radius: 4px; border-left: 3px solid #e67e22;'>✏️ <b>Need to make a change?</b> You can edit your team anytime before <b>{close_time_str}</b>. Just go to the <a href='{public_link}' target='_blank'>Tournament Dashboard</a>, click the <b>🔍 Check Entry</b> tab, and enter your email address to securely unlock your entry!</p>" if close_time_str else ""
@@ -500,7 +499,7 @@ def send_confirmation_email(user_email, name, picks, tie_breaker, payment, t_nam
         <html>
           <body style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #2c3e50; line-height: 1.6; max-width: 600px; margin: 0 auto; padding: 20px;">
             {logo_html}
-            <p style="font-size: 16px;">Hi <b>{name}</b>,</p>
+            <p style="font-size: 16px;">Hi <b>{html.escape(name)}</b>,</p>
             <p style="font-size: 16px;">Your entry has been securely <b>{status_word.lower()}</b>! Here are your official team picks for the tournament:</p>
             
             <div style="background-color: #f8f9fa; border-left: 4px solid #2ecc71; padding: 15px 20px; border-radius: 4px; margin: 20px 0;">
@@ -510,7 +509,7 @@ def send_confirmation_email(user_email, name, picks, tie_breaker, payment, t_nam
                 </ul>
                 <hr style="border: 0; border-top: 1px solid #dee2e6; margin: 15px 0;">
                 <p style="margin: 5px 0; font-size: 15px;"><b>Tie Breaker Score:</b> <span style="color: #2980b9; font-weight: bold;">{tie_breaker}</span></p>
-                <p style="margin: 5px 0; font-size: 15px;"><b>Payment Method:</b> {payment}</p>
+                <p style="margin: 5px 0; font-size: 15px;"><b>Payment Method:</b> {html.escape(payment)}</p>
             </div>
             
             {edit_notice}
@@ -525,14 +524,10 @@ def send_confirmation_email(user_email, name, picks, tie_breaker, payment, t_nam
         
         msg['Bcc'] = sender 
         
-        server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()
-        server.login(sender, pwd)
-        server.send_message(msg) 
-        server.quit()
+        threading.Thread(target=_send_email_async, args=(msg, sender, pwd)).start()
         return True
     except Exception as e: 
-        st.session_state.setdefault("api_log", []).append(f"Email Error (send_confirmation): {e}")
+        print(f"Email Error (send_confirmation): {e}")
         return False
 
 def send_magic_link_email(user_email, t_name, t_id, magic_secret, logo_url=""):
@@ -567,14 +562,11 @@ def send_magic_link_email(user_email, t_name, t_id, magic_secret, logo_url=""):
         </html>
         """
         msg.attach(MIMEText(body, 'html'))
-        server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()
-        server.login(sender, pwd)
-        server.send_message(msg) 
-        server.quit()
+        
+        threading.Thread(target=_send_email_async, args=(msg, sender, pwd)).start()
         return True
     except Exception as e: 
-        st.session_state.setdefault("api_log", []).append(f"Email Error (send_magic_link): {e}")
+        print(f"Email Error (send_magic_link): {e}")
         return False
 
 def append_entry_to_sheet(t_id, entry_row):
@@ -596,7 +588,7 @@ def append_entry_to_sheet(t_id, entry_row):
         get_raw_sheet_data.clear() # Instantly update cache
         return True
     except Exception as e: 
-        st.session_state.setdefault("api_log", []).append(f"DB Error (append_entry): {e}")
+        print(f"DB Error (append_entry): {e}")
         return False
 
 def update_single_cell_in_sheet(t_id, row_number, header_name, new_value):
@@ -616,7 +608,7 @@ def update_single_cell_in_sheet(t_id, row_number, header_name, new_value):
             return True
         return False
     except Exception as e:
-        st.session_state.setdefault("api_log", []).append(f"DB Error (update_single_cell): {e}")
+        print(f"DB Error (update_single_cell): {e}")
         return False
 
 def update_specific_entry(t_id, row_index, entry_row):
@@ -636,7 +628,7 @@ def update_specific_entry(t_id, row_index, entry_row):
         get_raw_sheet_data.clear()
         return True
     except Exception as e: 
-        st.session_state.setdefault("api_log", []).append(f"DB Error (update_specific_entry): {e}")
+        print(f"DB Error (update_specific_entry): {e}")
         return False
         
 def update_paid_status(t_id, row_index, is_paid):
@@ -645,7 +637,7 @@ def update_paid_status(t_id, row_index, is_paid):
         get_raw_sheet_data.clear()
         return True
     except Exception as e: 
-        st.session_state.setdefault("api_log", []).append(f"DB Error (update_paid_status): {e}")
+        print(f"DB Error (update_paid_status): {e}")
         return False
 
 def send_admin_api_alert(url, error_details):
@@ -686,16 +678,12 @@ def send_admin_api_alert(url, error_details):
         """
         msg.attach(MIMEText(body, 'html'))
         
-        server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()
-        server.login(sender, pwd)
-        server.send_message(msg) 
-        server.quit()
+        threading.Thread(target=_send_email_async, args=(msg, sender, pwd)).start()
         
         settings["last_api_alert_time"] = now
         return True
     except Exception as e:
-        st.session_state.setdefault("api_log", []).append(f"Email Error (send_admin_api_alert): {e}")
+        print(f"Email Error (send_admin_api_alert): {e}")
         return False
 
 def intelligent_api_call(url, trigger_reason="Unknown"):
@@ -950,11 +938,12 @@ def render_roster_table(picks, p_info_lower, rounds_active, counting_map, is_liv
     rows = []
     for p in picks:
         p_key = str(p).lower()
+        safe_p = html.escape(str(p))
         if p_key not in p_info_lower:
-            rows.append(f"<tr><td style='padding-bottom: 5px;'>⚠️ {p}</td><td colspan='{len(rounds_active)+1}' style='color:red;'>Not in Field</td></tr>")
+            rows.append(f"<tr><td style='padding-bottom: 5px;'>⚠️ {safe_p}</td><td colspan='{len(rounds_active)+1}' style='color:red;'>Not in Field</td></tr>")
             continue
         d = p_info_lower[p_key]; stt = d['status']
-        row_html = f"<tr><td style='padding-right:15px; min-width:140px; padding-bottom: 5px;'>{p}</td>"
+        row_html = f"<tr><td style='padding-right:15px; min-width:140px; padding-bottom: 5px;'>{safe_p}</td>"
         for r in rounds_active:
             s = d['rounds'].get(r, None); is_cnt = p_key in counting_map.get(r, [])
             if s is None and stt in ['cut', 'wd', 'dq']: val = f"<span style='color:#e74c3c;'>{stt.upper()}</span>"
@@ -1148,7 +1137,7 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
             final_status = 'wd' if name_lower in dns_list else norm_status
             
             try: strokes = [safe_int(rd.get('strokes', 0)) for rd in p.get('rounds', [])]
-            except: strokes = [0]*4
+            except Exception: strokes = [0]*4
                 
             rds = {}
             if final_status not in ['wd', 'dq']:
@@ -1231,14 +1220,14 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
         if not is_admin_download:
             if logo_url:
                 try:
-                    st.markdown(f"<div style='text-align: center; padding-bottom: 10px;'><img src='{logo_url}' style='max-width: 250px; max-height: 150px; width: 100%; object-fit: contain;'></div>", unsafe_allow_html=True)
-                except: pass
+                    st.markdown(f"<div style='text-align: center; padding-bottom: 10px;'><img src='{html.escape(logo_url)}' style='max-width: 250px; max-height: 150px; width: 100%; object-fit: contain;'></div>", unsafe_allow_html=True)
+                except Exception: pass
             elif not hide_title:
-                st.header(f"🏆 {t_name.split('(')[0]}")
+                st.header(f"🏆 {html.escape(t_name.split('(')[0])}")
 
             if t_status not in ['pre', ''] and current_r > 0:
                 if t_status == 'completed':
-                    status_bar_html = f"<div class='compact-container' style='display: flex; justify-content: center; align-items: center; padding: 12px;'><div style='font-weight: bold; font-size: 1.15em; color: #2ecc71;'>🏆 {status_txt}</div></div>"
+                    status_bar_html = f"<div class='compact-container' style='display: flex; justify-content: center; align-items: center; padding: 12px;'><div style='font-weight: bold; font-size: 1.15em; color: #2ecc71;'>🏆 {html.escape(status_txt)}</div></div>"
                     st.markdown(status_bar_html, unsafe_allow_html=True)
                 else:
                     last_ts = int(last_f.timestamp() * 1000) if last_f else 0
@@ -1260,7 +1249,7 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
                     </head>
                     <body>
                         <div class="box">
-                            <div class="title">⛳ {status_txt}</div>
+                            <div class="title">⛳ {html.escape(status_txt)}</div>
                             <div class="row">
                                 <span>🕒 <b>Last Check:</b> <span id="t-last">...</span></span>
                                 <span>⏳ <b>Next Check:</b> <span id="t-next">...</span></span>
@@ -1294,7 +1283,7 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
         df_resp['_entry_num'] = df_resp.groupby('_name_lower').cumcount() + 1
         
         def make_display_name(r):
-            base = str(r[name_col]).strip()
+            base = html.escape(str(r[name_col]).strip())
             if r['_total_entries'] > 1:
                 return f"{base} <span style='font-size: 0.75em; background-color: rgba(130, 130, 130, 0.25); padding: 2px 6px; border-radius: 10px; margin-left: 6px; font-weight: normal; vertical-align: middle;'>Team {r['_entry_num']}</span>"
             return base
@@ -1393,7 +1382,7 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
                     r_str = str(row.get('DRank', '-'))
                     if r_str == '-': continue
                     if r_str not in grouped_ranks: grouped_ranks[r_str] = []
-                    grouped_ranks[r_str].append(str(row['Participant']))
+                    grouped_ranks[r_str].append(html.escape(str(row['Participant'])))
                 
                 for r_str, names in grouped_ranks.items():
                     match = re.search(r'\d+', r_str)
@@ -1473,11 +1462,11 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
             for p in row['Picks']:
                 p_key = p.lower()
                 if not api_data_loaded: pass 
-                elif p_key not in p_info_lower: warn_list.append(f"Invalid Pick: {p}")
+                elif p_key not in p_info_lower: warn_list.append(f"Invalid Pick: {html.escape(p)}")
                 elif vp_lower and p_key not in vp_lower:
-                    if p_info_lower[p_key]['status'] not in ['cut', 'wd', 'dq']: warn_list.append(f"Possible WD/DNS: {p}")
+                    if p_info_lower[p_key]['status'] not in ['cut', 'wd', 'dq']: warn_list.append(f"Possible WD/DNS: {html.escape(p)}")
             
-            for w in row['SheetWarnings']: warn_list.append(str(w))
+            for w in row['SheetWarnings']: warn_list.append(html.escape(str(w)))
             warn_list = list(dict.fromkeys(warn_list))
             
             if row['Elim']: 
@@ -1611,7 +1600,7 @@ if is_public:
             settings[f"payout_2_{tid}"] = pconf.get("p2", 0)
             settings[f"payout_3_{tid}"] = pconf.get("p3", 0)
             settings[f"payout_pot_{tid}"] = pconf.get("pot", 0)
-    except: pass
+    except Exception: pass
     
     lb_data, _, _, full_data, data_source = fetch_smart_leaderboard(tid)
     
@@ -1675,7 +1664,7 @@ if is_public:
             rt_uk = uk_tz.localize(reveal_time)
             rt_et = rt_uk.astimezone(et_tz)
             reveal_time_str_ui = f"{rt_uk.strftime('%a, %b %d at %I:%M %p')} UK / {rt_et.strftime('%a, %b %d at %I:%M %p')} ET"
-    except:
+    except Exception:
         if close_time: 
             close_time_str_email = close_time.strftime('%a, %b %d at %I:%M %p')
             close_time_str_ui = close_time_str_email
@@ -1696,12 +1685,12 @@ if is_public:
     
     if public_logo:
         try:
-            st.markdown(f"<div style='text-align: center; padding-bottom: 10px;'><img src='{public_logo}' style='max-width: 250px; max-height: 150px; width: 100%; object-fit: contain;'></div>", unsafe_allow_html=True)
+            st.markdown(f"<div style='text-align: center; padding-bottom: 10px;'><img src='{html.escape(public_logo)}' style='max-width: 250px; max-height: 150px; width: 100%; object-fit: contain;'></div>", unsafe_allow_html=True)
             logo_rendered = True
-        except: pass 
+        except Exception: pass 
             
     if not logo_rendered:
-        st.markdown(f"<h1 style='text-align: center; padding-bottom: 10px;'>🏆 {tnm.split('(')[0]}</h1>", unsafe_allow_html=True)
+        st.markdown(f"<h1 style='text-align: center; padding-bottom: 10px;'>🏆 {html.escape(tnm.split('(')[0])}</h1>", unsafe_allow_html=True)
     
     tab_names = ["🏆 Leaderboard"]
     if is_accepting_entries: tab_names.append("📝 Enter Team")
@@ -1837,7 +1826,7 @@ if is_public:
                 success_html = f"""
                 <div style='text-align: center; padding: 40px 20px; background-color: var(--secondary-background-color); border-radius: 10px; border: 2px solid #2ecc71; margin-bottom: 20px;'>
                     <h2 style='color: #27ae60; margin-top: 0;'>🎉 Success! Your team is locked in.</h2>
-                    <p style='font-size: 16px;'>We've securely saved your entry and sent a confirmation email to <b>{st.session_state.get(f'success_email_{tid}')}</b>.</p>
+                    <p style='font-size: 16px;'>We've securely saved your entry and sent a confirmation email to <b>{html.escape(st.session_state.get(f'success_email_{tid}'))}</b>.</p>
                     <p style='font-size: 15px; opacity: 0.8;'>You can review or edit your picks at any time before the deadline using the <b>🔍 Check Entry</b> tab.</p>
                 </div>
                 """
@@ -1974,7 +1963,7 @@ if is_public:
                     edit_success_html = f"""
                     <div style='text-align: center; padding: 40px 20px; background-color: var(--secondary-background-color); border-radius: 10px; border: 2px solid #2ecc71; margin-bottom: 20px;'>
                         <h2 style='color: #27ae60; margin-top: 0;'>✅ Team Updated Successfully!</h2>
-                        <p style='font-size: 16px;'>We've securely saved your changes and sent a new confirmation email to <b>{st.session_state.get(f'edit_success_email_{tid}')}</b>.</p>
+                        <p style='font-size: 16px;'>We've securely saved your changes and sent a new confirmation email to <b>{html.escape(st.session_state.get(f'edit_success_email_{tid}'))}</b>.</p>
                     </div>
                     """
                     st.markdown(edit_success_html, unsafe_allow_html=True)
@@ -2010,11 +1999,13 @@ if is_public:
                                 tie_val = int(safe_int(r.get('Tie Breaker', r.get('Tie', 0))))
                                 c1, c2 = st.columns([3, 1])
                                 with c1:
+                                    safe_team_name = html.escape(str(r[name_col_val]))
+                                    safe_picks = html.escape(', '.join(p_list))
                                     if is_authenticated:
-                                        st.markdown(f"**Team Name:** {r[name_col_val]}  |  **Tie Breaker:** `{tie_val}`\n\n**Picks:** {', '.join(p_list)}")
+                                        st.markdown(f"**Team Name:** {safe_team_name}  |  **Tie Breaker:** `{tie_val}`\n\n**Picks:** {safe_picks}")
                                         if not str(r.get("Field Status", "✅ All Valid")).startswith("✅"): st.error(f"🚨 Roster Issue: {r.get('Field Status')}")
                                     else:
-                                        st.markdown(f"**Team Name:** {r[name_col_val]}\n\n🔒 *Picks and Tie Breaker are hidden. Click the button above to send a secure link to your email to view or edit this entry.*")
+                                        st.markdown(f"**Team Name:** {safe_team_name}\n\n🔒 *Picks and Tie Breaker are hidden. Click the button above to send a secure link to your email to view or edit this entry.*")
                                         if not str(r.get("Field Status", "✅ All Valid")).startswith("✅"): st.error(f"🚨 Roster Issue Detected! Please use the secure link to fix your team.")
                                         
                                 with c2:
@@ -2198,7 +2189,7 @@ else:
                     settings[f"payout_2_{t_id}"] = pconf.get("p2", 0)
                     settings[f"payout_3_{t_id}"] = pconf.get("p3", 0)
                     settings[f"payout_pot_{t_id}"] = pconf.get("pot", 0)
-            except: pass
+            except Exception: pass
             
             st.subheader("🖼️ Branding")
             current_logo = fetch_logo_from_sheet(t_id)
@@ -2315,11 +2306,8 @@ else:
                 reveal_str = datetime.datetime.combine(reveal_d, reveal_t).strftime("%Y-%m-%d %H:%M:%S")
                 
                 with st.spinner("Saving to database..."):
-                    # Write directly to Supabase so it survives a reboot/cache clear
                     update_config(t_id, 'close_time', close_str)
                     update_config(t_id, 'reveal_time', reveal_str)
-                    
-                    # Clear the specific caches so the UI updates immediately
                     fetch_close_time_from_db.clear()
                     fetch_reveal_time_from_db.clear()
                     
@@ -2365,12 +2353,12 @@ else:
         
         if admin_logo:
             try:
-                st.markdown(f"<div style='text-align: center; padding-bottom: 10px;'><img src='{admin_logo}' style='max-width: 250px; max-height: 150px; width: 100%; object-fit: contain;'></div>", unsafe_allow_html=True)
+                st.markdown(f"<div style='text-align: center; padding-bottom: 10px;'><img src='{html.escape(admin_logo)}' style='max-width: 250px; max-height: 150px; width: 100%; object-fit: contain;'></div>", unsafe_allow_html=True)
                 logo_rendered = True
-            except: pass 
+            except Exception: pass 
 
         if not logo_rendered:
-            st.markdown(f"<h1 style='text-align: center; padding-bottom: 10px;'>🏆 {t_name_display}</h1>", unsafe_allow_html=True)
+            st.markdown(f"<h1 style='text-align: center; padding-bottom: 10px;'>🏆 {html.escape(t_name_display)}</h1>", unsafe_allow_html=True)
 
         t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11 = st.tabs(["🏆 Leaderboard", "📝 Entries", "💵 Financials", "⛳ Official PGA Scores", "💾 Export", "📡 API Status", "💻 Raw JSON", "📜 Rules", "🏌️ Field", "📈 Analytics", "🔀 Aliases"])
         
@@ -2517,7 +2505,7 @@ else:
                 
                 saved_bals_str = fetch_fin_balances_from_sheet(t_id)
                 try: saved_bals = json.loads(saved_bals_str)
-                except: saved_bals = {}
+                except Exception: saved_bals = {}
 
                 col_z, col_p, col_r = st.columns(3)
                 with col_z:
@@ -2700,7 +2688,7 @@ else:
                                     uk_tz = pytz.timezone('Europe/London'); et_tz = pytz.timezone('America/New_York')
                                     ct_uk = uk_tz.localize(current_close_dt); ct_et = ct_uk.astimezone(et_tz)
                                     close_time_str_admin = f"{ct_uk.strftime('%a, %b %d at %I:%M %p')} UK / {ct_et.strftime('%a, %b %d at %I:%M %p')} ET"
-                                except: close_time_str_admin = current_close_dt.strftime('%a, %b %d at %I:%M %p')
+                                except Exception: close_time_str_admin = current_close_dt.strftime('%a, %b %d at %I:%M %p')
                                 
                                 emails_sent = 0
                                 alerted_emails = set()
