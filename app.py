@@ -2337,4 +2337,483 @@ else:
                     alert_html = f"""
                     <div style="background-color: rgba(46, 204, 113, 0.15); padding: 12px; border-radius: 6px; border-left: 4px solid #2ecc71; margin-top: 15px; margin-bottom: 15px;">
                         <div style="color: #27ae60; font-weight: bold; margin-bottom: 5px;">✅ Standard Deadline Confirmed</div>
-                        <div style="font-size: 0.95em;">🇬🇧 UK Time: <b>{preview_uk.strftime('%I:%M %p')}</b> on {preview_uk.strftime('%b %
+                        <div style="font-size: 0.95em;">🇬🇧 UK Time: <b>{preview_uk.strftime('%I:%M %p')}</b> on {preview_uk.strftime('%b %d')}</div>
+                        <div style="font-size: 0.95em;">🇺🇸 US ET: <b>{preview_et.strftime('%I:%M %p')}</b> on {preview_et.strftime('%b %d')}</div>
+                    </div>
+                    """
+                else:
+                    alert_html = f"""
+                    <div style="background-color: rgba(230, 126, 34, 0.15); padding: 12px; border-radius: 6px; border-left: 4px solid #e67e22; margin-top: 15px; margin-bottom: 15px;">
+                        <div style="color: #d35400; font-weight: bold; margin-bottom: 5px;">⚠️ Warning: Non-Standard Deadline</div>
+                        <div style="font-size: 0.9em; margin-bottom: 8px;">Entries are <b>not</b> set to close at Midnight ET. Are you sure you want to use this time?</div>
+                        <div style="font-size: 0.95em;">🇬🇧 UK Time: <b>{preview_uk.strftime('%I:%M %p')}</b> on {preview_uk.strftime('%b %d')}</div>
+                        <div style="font-size: 0.95em;">🇺🇸 US ET: <b>{preview_et.strftime('%I:%M %p')}</b> on {preview_et.strftime('%b %d')}</div>
+                    </div>
+                    """
+                st.markdown(alert_html, unsafe_allow_html=True)
+            except Exception: pass
+            
+            if st.button("💾 Save Tournament Dates", type="primary", use_container_width=True):
+                close_str = datetime.datetime.combine(close_d, close_t).strftime("%Y-%m-%d %H:%M:%S")
+                reveal_str = datetime.datetime.combine(reveal_d, reveal_t).strftime("%Y-%m-%d %H:%M:%S")
+                
+                with st.spinner("Saving to database..."):
+                    update_config(t_id, 'close_time', close_str)
+                    update_config(t_id, 'reveal_time', reveal_str)
+                    
+                st.success("✅ Dates saved securely! They will not change unless you click this again.")
+            
+            p_url = f"{BASE_URL}?view=public&tourney_id={t_id}"
+                
+            st.markdown("---")
+            st.write("🔗 **Public Sharing Link**")
+            st.code(p_url)
+            
+            if st.button("👀 Preview Public Leaderboard", type="primary", use_container_width=True):
+                st.query_params.clear()
+                st.query_params["view"] = "public"
+                st.query_params["tourney_id"] = str(t_id)
+                st.rerun()
+                
+            saved_short_url = fetch_short_url_from_sheet(t_id)
+            
+            if saved_short_url:
+                st.success("✨ Anonymous Short Link Ready!")
+                st.code(saved_short_url)
+                if st.button("🗑️ Reset Short Link"): 
+                    save_short_url_to_sheet(t_id, "")
+                    st.rerun()
+            else:
+                if st.button("✨ Generate Anonymous Short Link"):
+                    with st.spinner("Generating short link..."):
+                        short_link = generate_short_link(p_url)
+                        if short_link: 
+                            save_short_url_to_sheet(t_id, short_link)
+                            st.success("Created!")
+                            st.rerun()
+                        else: 
+                            st.error("Failed to generate link.")
+                            
+            if st.button("🔄 Clear Cache"): get_api_cache().clear(); st.cache_data.clear(); get_raw_sheet_data.clear(); st.rerun()
+
+    if t_id:
+        admin_logo = fetch_logo_from_sheet(t_id)
+        t_name_display = t_key.split('(')[0].strip() if t_key else "Tournament"
+        logo_rendered = False
+        
+        if admin_logo:
+            try:
+                st.markdown(f"<div style='text-align: center; padding-bottom: 10px;'><img src='{safe_url(admin_logo)}' style='max-width: 250px; max-height: 150px; width: 100%; object-fit: contain;'></div>", unsafe_allow_html=True)
+                logo_rendered = True
+            except Exception: pass 
+
+        if not logo_rendered:
+            st.markdown(f"<h1 style='text-align: center; padding-bottom: 10px;'>🏆 {html.escape(str(t_name_display))}</h1>", unsafe_allow_html=True)
+
+        t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11 = st.tabs(["🏆 Leaderboard", "📝 Entries", "💵 Financials", "⛳ Official PGA Scores", "💾 Export", "📡 API Status", "💻 Raw JSON", "📜 Rules", "🏌️ Field", "📈 Analytics", "🔀 Aliases"])
+        
+        lb_data, next_f, last_f, full_data, data_source = fetch_smart_leaderboard(t_id)
+        
+        raw_results = get_safe_api_results(full_data)
+        tourney_data = raw_results.get('tournament') or {}
+        live_details = tourney_data.get('live_details') or {}
+        t_status = normalize_pga_status(live_details.get('status', ''))
+        is_tournament_started = t_status != 'pre'
+        
+        top20_cached_admin = get_top_20_players()
+        
+        if not is_tournament_started:
+            formatted_field_admin = get_formatted_field(t_id, top20_cached_admin)
+        else:
+            backup_str = fetch_field_backup_from_sheet(t_id)
+            formatted_field_admin = [x.strip() for x in backup_str.split(',')] if backup_str else []
+            
+        valid_p = [p.split(" (Top 20")[0] for p in formatted_field_admin]
+        
+        with t1: 
+            if "Memory" in data_source: st.info(f"**Data Source:** {data_source}")
+            elif "Live" in data_source: st.success(f"**Data Source:** {data_source}")
+            else: st.warning(f"**Data Source:** {data_source}")
+            
+            admin_lb_tab, pub_lb_tab = st.tabs(["🕵️‍♂️ Admin View (Live Scoring)", "🌍 Public View (Delayed)"])
+            with admin_lb_tab:
+                calculate_leaderboard(t_id, t_key, t_start, par_override=current_par_override, dns_input=current_dns, valid_players=valid_p, is_admin_view=True, hide_title=True)        
+            with pub_lb_tab:
+                calculate_leaderboard(t_id, t_key, t_start, par_override=current_par_override, dns_input=current_dns, valid_players=valid_p, is_admin_view=False, hide_title=True)        
+        
+        admin_df, admin_count = get_clean_entries(t_id, False, valid_players=valid_p, dns_players=str(current_dns or "").split(","))
+        edited_df = pd.DataFrame()
+        
+        with t2: 
+            st.metric("🎟️ Total Entries", admin_count)
+            if not admin_df.empty:
+                st.caption("Check the 'Paid' box for users and hit Save to securely write to Supabase.")
+                top_button_container = st.container()
+                disabled_cols = [c for c in admin_df.columns if c != 'Paid']
+                
+                edited_df = st.data_editor(admin_df, width="stretch", hide_index=True, disabled=disabled_cols, column_config={"Sheet_Row": None, "_Original_Name": None, "Paid": st.column_config.CheckboxColumn("Paid?", default=False)})
+                
+                with top_button_container:
+                    if st.button("💾 Save Payment Statuses", type="primary", width="stretch"):
+                        with st.spinner("Writing to Database..."):
+                            diffs = edited_df[edited_df['Paid'] != admin_df['Paid']]
+                            if not diffs.empty:
+                                success = True
+                                for idx, row in diffs.iterrows():
+                                    if not update_paid_status(t_id, row['Sheet_Row'], row['Paid']): success = False
+                                    else: log_to_sheet("ADMIN ACTION", f"Marked {'Paid' if row['Paid'] else 'Unpaid'} for {row.get('_Original_Name', 'Unknown')}")
+                                if success: st.success("✅ Payment statuses successfully saved to DB! Your financials are locked in.")
+                                else: st.error("🚨 Encountered an error updating some rows.")
+                            else: st.info("No changes to save.")
+                        
+                st.markdown("---")
+                st.markdown("### 🛠️ Quick Edits (Payment & Picks)")
+                name_col = next((c for c in admin_df.columns if c not in ['Sheet_Row', 'Email', 'Payment Method', 'Paid', 'Tie', 'Picks', 'Field Status', 'SheetWarnings', 'Tie Breaker'] and 'pick' not in c.lower()), admin_df.columns[2])
+                team_opts = [""] + [f"{r[name_col]} (Current: {r.get('Payment Method', 'Unknown')})" for i, r in admin_df.iterrows()]
+                
+                target_team_str = st.selectbox("Select Team to Update:", team_opts)
+                
+                if target_team_str:
+                    target_name = target_team_str.split(" (Current:")[0]
+                    target_row = admin_df[admin_df[name_col] == target_name].iloc[0]
+                    st.markdown(f"**Editing:** `{html.escape(str(target_name))}`")
+                    
+                    c1, c2 = st.columns([2, 1])
+                    with c1: 
+                        admin_clean_opts = [p for p in pay_opts if p != "Select..."]
+                        curr_pay = target_row.get('Payment Method')
+                        new_pay = st.selectbox("Payment Method:", admin_clean_opts, index=admin_clean_opts.index(curr_pay) if curr_pay in admin_clean_opts else 0)
+                    with c2:
+                        st.markdown("<br>", unsafe_allow_html=True) 
+                        if st.button("💾 Update Method", type="primary", width="stretch"):
+                            with st.spinner("Updating DB..."):
+                                if update_single_cell_in_sheet(t_id, target_row['Sheet_Row'], "Payment Method", new_pay):
+                                    log_to_sheet("ADMIN ACTION", f"Changed payment method to '{new_pay}' for {target_name}")
+                                    st.toast("✅ Payment updated successfully!")
+                                    time.sleep(1); st.rerun() 
+                                else: st.error("🚨 Failed to update.")
+                                
+                    st.markdown("**Edit Players:**")
+                    pick_cols_target = [c for c in admin_df.columns if 'pick' in c.lower() and pd.notna(target_row[c])]
+                    current_picks = [str(target_row[c]).split(" (Top 20")[0].strip() for c in pick_cols_target][:5]
+                    current_picks += [""] * (5 - len(current_picks)) 
+                    
+                    p_cols = st.columns(5)
+                    new_ep = []
+                    for i in range(5):
+                        with p_cols[i]:
+                            new_ep.append(st.selectbox(f"Pick {i+1}", [""] + formatted_field_admin, index=get_dropdown_index(current_picks[i], formatted_field_admin), key=f"adm_p{i}"))
+                    
+                    if st.button("💾 Update Picks", type="primary"):
+                        clean_new_picks = [p for p in new_ep if p != ""]
+                        if len(clean_new_picks) != 5: st.error("🚨 Must select exactly 5 players.")
+                        elif len(set(clean_new_picks)) != 5: st.error("🚨 Duplicate players detected!")
+                        elif sum(1 for p in clean_new_picks if "(Top 20" in p) > 2: st.error("🚨 Too many Top 20 players!")
+                        else:
+                            with st.spinner("Writing new picks to Database..."):
+                                success = True
+                                actual_pick_headers = [c for c in admin_df.columns if c.strip().lower().startswith("pick") or "player pick" in c.lower()][:5]
+                                if len(actual_pick_headers) == 5:
+                                    for i in range(5):
+                                        if not update_single_cell_in_sheet(t_id, target_row['Sheet_Row'], actual_pick_headers[i], clean_new_picks[i]): success = False
+                                    if success:
+                                        log_to_sheet("ADMIN ACTION", f"Manually swapped picks for {target_name}")
+                                        st.success("✅ Picks updated successfully!")
+                                        time.sleep(1); st.rerun()
+                                    else: st.error("🚨 Failed to update some picks.")
+                                else: st.error("🚨 Could not identify the exactly 5 pick columns.")
+
+        with t3:
+            st.header("💵 Financial Reconciliation & Payouts")
+            fee = st.number_input("Standard Entry Fee ($)", value=30, step=5)
+            st.divider(); st.subheader("📊 Collection Status by Payment Method")
+            
+            current_fin_df = edited_df if not edited_df.empty else admin_df
+            
+            if not current_fin_df.empty and 'Payment Method' in current_fin_df.columns:
+                df_calc = current_fin_df.copy()
+                df_calc['Fee_Mult'] = df_calc['Payment Method'].apply(lambda x: 0 if str(x).startswith('Other') else fee)
+                df_calc['Is_Paid'] = df_calc['Paid'].apply(lambda x: 1 if str(x).lower() in ['true', 'yes', '1', 'y'] or x is True else 0)
+                
+                df_fin = df_calc.groupby('Payment Method').agg(Total_Entries=('Payment Method', 'size'), Paid_Entries=('Is_Paid', 'sum'), Fee_Per_Entry=('Fee_Mult', 'max')).reset_index()
+                
+                df_fin['Expected ($)'] = df_fin['Total_Entries'] * df_fin['Fee_Per_Entry']
+                df_fin['Collected ($)'] = df_fin['Paid_Entries'] * df_fin['Fee_Per_Entry']
+                df_fin['Outstanding ($)'] = df_fin['Expected ($)'] - df_fin['Collected ($)']
+                
+                display_fin = df_fin[['Payment Method', 'Total_Entries', 'Paid_Entries', 'Expected ($)', 'Collected ($)', 'Outstanding ($)']].rename(columns={'Total_Entries': 'Total Entries', 'Paid_Entries': 'Paid Entries'})
+                st.dataframe(display_fin, width="stretch", hide_index=True)
+                
+                total_expected, total_collected, total_outstanding = display_fin['Expected ($)'].sum(), display_fin['Collected ($)'].sum(), display_fin['Outstanding ($)'].sum()
+                
+                st.markdown("### 🏦 Bank Account Reconciliation (Actuals)")
+                st.caption("Compare your real bank balances against the 'Collected' amounts tracked via the checkboxes above.")
+                
+                z_coll = df_fin[df_fin['Payment Method'].str.contains('Zelle', case=False, na=False)]['Collected ($)'].sum()
+                p_coll = df_fin[df_fin['Payment Method'].str.contains('PayPal', case=False, na=False)]['Collected ($)'].sum()
+                r_coll = df_fin[df_fin['Payment Method'].str.contains('Revolut', case=False, na=False)]['Collected ($)'].sum()
+                
+                saved_bals_str = fetch_fin_balances_from_sheet(t_id)
+                try: saved_bals = json.loads(saved_bals_str)
+                except json.JSONDecodeError: saved_bals = {}
+
+                col_z, col_p, col_r = st.columns(3)
+                with col_z:
+                    st.markdown("**Zelle / Bank**"); st.caption(f"App Collected: **${z_coll}**")
+                    z_actual = st.number_input("Actual Zelle Balance", value=float(saved_bals.get("z_act", 0.0)), step=10.0)
+                    z_personal = st.number_input("Subtract Personal Money", value=float(saved_bals.get("z_per", 0.0)), step=10.0, key="z_pers")
+                    z_net = z_actual - z_personal; z_diff = z_net - z_coll
+                    st.metric("Net Zelle Revenue", f"${z_net:,.2f}", delta=f"-${abs(z_diff):,.2f} vs App" if z_diff < 0 else f"+${z_diff:,.2f} vs App" if z_diff > 0 else "Matches App ✅", delta_color="inverse" if z_diff > 0 else "normal" if z_diff < 0 else "off")
+                with col_p:
+                    st.markdown("**PayPal**"); st.caption(f"App Collected: **${p_coll}**")
+                    p_actual = st.number_input("Actual PayPal Balance", value=float(saved_bals.get("p_act", 0.0)), step=10.0)
+                    p_personal = st.number_input("Subtract Personal Money", value=float(saved_bals.get("p_per", 0.0)), step=10.0, key="p_pers")
+                    p_net = p_actual - p_personal; p_diff = p_net - p_coll
+                    st.metric("Net PayPal Revenue", f"${p_net:,.2f}", delta=f"-${abs(p_diff):,.2f} vs App" if p_diff < 0 else f"+${p_diff:,.2f} vs App" if p_diff > 0 else "Matches App ✅", delta_color="inverse" if p_diff > 0 else "normal" if p_diff < 0 else "off")
+                with col_r:
+                    st.markdown("**Revolut / Cash / Other**"); st.caption(f"App Collected: **${r_coll}**")
+                    r_actual = st.number_input("Actual Revolut/Cash", value=float(saved_bals.get("r_act", 0.0)), step=10.0)
+                    r_personal = st.number_input("Subtract Personal Money", value=float(saved_bals.get("r_per", 0.0)), step=10.0, key="r_pers")
+                    r_net = r_actual - r_personal; r_diff = r_net - r_coll
+                    st.metric("Net Revolut/Cash", f"${r_net:,.2f}", delta=f"-${abs(r_diff):,.2f} vs App" if r_diff < 0 else f"+${r_diff:,.2f} vs App" if r_diff > 0 else "Matches App ✅", delta_color="inverse" if r_diff > 0 else "normal" if r_diff < 0 else "off")
+                
+                total_actual_bank = z_net + p_net + r_net; diff_bank_vs_app = total_actual_bank - total_collected
+                
+                if st.button("💾 Save Bank Balances to DB", type="secondary", width="stretch"):
+                    new_bals = json.dumps({"z_act": z_actual, "z_per": z_personal, "p_act": p_actual, "p_per": p_personal, "r_act": r_actual, "r_per": r_personal})
+                    with st.spinner("Writing balances to DB..."):
+                        if save_fin_balances_to_sheet(t_id, new_bals): 
+                            log_to_sheet("ADMIN ACTION", "Saved Bank Account Reconciliation Balances")
+                            st.success("✅ Balances securely saved! They will permanently survive a refresh.")
+                        else: st.error("🚨 Failed to save balances.")
+
+                st.markdown("---"); st.markdown("### 🧮 Overall Reconciliation")
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Total Expected Pot", f"${total_expected:,.2f}"); c2.metric("Outstanding (Unpaid)", f"${total_outstanding:,.2f}")
+                c3.metric("Total Collected (App)", f"${total_collected:,.2f}")
+                c4.metric("Actual Bank Total", f"${total_actual_bank:,.2f}", delta=f"-${abs(diff_bank_vs_app):,.2f} Bank vs App" if diff_bank_vs_app < 0 else f"+${diff_bank_vs_app:,.2f} Bank vs App" if diff_bank_vs_app > 0 else "Perfect Match ✅", delta_color="inverse" if diff_bank_vs_app > 0 else "normal" if diff_bank_vs_app < 0 else "off")
+                
+                if total_expected > 0:
+                    pct = min(total_collected / total_expected, 1.0)
+                    st.progress(pct, text=f"💰 Collection Progress: ${total_collected:,.2f} / ${total_expected:,.2f} ({pct*100:.1f}%)")
+                    st.markdown("<br>", unsafe_allow_html=True)
+                
+                if diff_bank_vs_app != 0: st.error(f"🚨 **Discrepancy Detected:** Your actual bank balances are off by **${abs(diff_bank_vs_app):,.2f}** compared to the App. Please review payments!")
+                else: st.success("✅ **Reconciled:** Your actual bank balances perfectly match the tracked payments!")
+                
+                st.divider(); st.subheader("🏆 Payout Calculator"); st.caption("Calculations are based on your **Total Expected Pot**.")
+                pct_1, pct_2, pct_3 = st.columns(3)
+                with pct_1: p1_pct = st.number_input("1st Place %", value=60, step=5)
+                with pct_2: p2_pct = st.number_input("2nd Place %", value=30, step=5)
+                with pct_3: p3_pct = st.number_input("3rd Place %", value=10, step=5)
+                
+                st.markdown("**Final Payout Overrides (These are shown to the public):**")
+                fin_1, fin_2, fin_3 = st.columns(3)
+                with fin_1: final_1 = st.number_input("1st Place Amount ($)", value=int((p1_pct / 100) * total_expected), step=5)
+                with fin_2: final_2 = st.number_input("2nd Place Amount ($)", value=int((p2_pct / 100) * total_expected), step=5)
+                with fin_3: final_3 = st.number_input("3rd Place Amount ($)", value=int((p3_pct / 100) * total_expected), step=5)
+                
+                total_pot = final_1 + final_2 + final_3
+                expected_diff = total_expected - total_pot
+                bank_diff = total_actual_bank - total_pot
+                
+                if expected_diff == 0 and bank_diff >= 0:
+                    st.success(f"✅ **Perfect Match!** Total Prize Pot (\\${total_pot:,.2f}) perfectly matches the Expected Revenue, and your Bank has enough to cover it."); allow_save = True
+                elif expected_diff == 0 and bank_diff < 0:
+                    st.warning(f"⚠️ **Pot Matches Expected, but Bank is Short:** Your Prize Pot (\\${total_pot:,.2f}) matches the Total Expected Pot, BUT you are short \\${abs(bank_diff):,.2f} in actual bank collections! You can publish, but chase down those payments."); allow_save = True
+                elif expected_diff > 0:
+                    st.error(f"🚨 **Under Budget:** Your Prize Pot (\\${total_pot:,.2f}) is **\\${expected_diff:,.2f} LESS** than the Total Expected Pot (\\${total_expected:,.2f})."); allow_save = False
+                else:
+                    st.error(f"🚨 **Over Budget:** Your Prize Pot (\\${total_pot:,.2f}) is **\\${abs(expected_diff):,.2f} MORE** than the Total Expected Pot (\\${total_expected:,.2f})."); allow_save = False
+                
+                publish_payouts = st.checkbox("✅ Check here to confirm and reveal Payouts on the Public Tab", value=settings.get(f"payout_confirmed_{t_id}", False), disabled=not allow_save)
+                
+                if st.button("💾 Save Payout Configuration", disabled=not allow_save, type="primary"):
+                    settings[f"payout_1_{t_id}"], settings[f"payout_2_{t_id}"], settings[f"payout_3_{t_id}"], settings[f"payout_pot_{t_id}"], settings[f"payout_confirmed_{t_id}"] = final_1, final_2, final_3, total_pot, publish_payouts
+                    
+                    payout_json = json.dumps({"payout_confirmed": publish_payouts, "p1": final_1, "p2": final_2, "p3": final_3, "pot": total_pot})
+                    with st.spinner("Locking payouts to database..."):
+                        if save_payout_config_to_sheet(t_id, payout_json):
+                            log_to_sheet("ADMIN ACTION", f"Updated Payouts (Total Pot: ${total_pot:,.2f})")
+                            st.success("Payout configurations safely locked and updated!")
+                        else:
+                            st.error("🚨 Failed to save payouts.")
+            else: st.warning("No entries or payment data found yet.")
+
+        with t4: 
+            if "Memory" in data_source: st.info(f"**Data Source:** {data_source}")
+            elif "Live" in data_source: st.success(f"**Data Source:** {data_source}")
+            else: st.warning(f"**Data Source:** {data_source}")
+            
+            admin_pga_tab, pub_pga_tab = st.tabs(["🕵️‍♂️ Admin View (Live Scoring)", "🌍 Public View (Delayed)"])
+            with admin_pga_tab:
+                render_pga_leaderboard(lb_data, full_data, t_id, "admin", par_override=current_par_override, hide_tt=current_hide_tt)
+            with pub_pga_tab:
+                render_pga_leaderboard(lb_data, full_data, t_id, "pub", par_override=current_par_override, hide_tt=current_hide_tt)
+        
+        with t5:
+            st.subheader("💾 Export Data")
+            st.caption("Download the high-level tournament standings (Rank, Name, Total Score, Tie-Breaker).")
+            df_export = calculate_leaderboard(t_id, t_key, t_start, par_override=current_par_override, dns_input=current_dns, valid_players=valid_p, is_admin_download=True, is_admin_view=True)            
+            if df_export is not None and not df_export.empty:
+                export_final = pd.DataFrame()
+                export_final['Rank'] = df_export['DRank']
+                export_final['Player Name'] = df_export['Participant']
+                export_final['Total Score'] = df_export.apply(lambda x: "CUT" if x['Elim'] else x['Total'], axis=1)
+                export_final['Tie Breaker'] = df_export['Tie']
+                st.download_button("⬇️ Download Top-Level Results (CSV)", export_final.to_csv(index=False).encode('utf-8'), f"{html.escape(str(t_key)).replace(' ', '_').split('(')[0]}_Leaderboard.csv", "text/csv")
+            else: st.warning("No data to export.")
+                
+        with t6:
+            st.subheader("📡 API Monitor")
+            cache = get_api_cache()
+            lb_key = f"lb_{t_id}"
+            
+            c1, c2 = st.columns(2)
+            with c1: st.metric("Last Fetch", cache[lb_key]['last_fetch'].strftime("%H:%M:%S") if lb_key in cache else "Never")
+            with c2: st.metric("Next Allowed", cache[lb_key]['next_fetch_allowed'].strftime("%H:%M:%S") if lb_key in cache else "Now")
+            
+            st.info(f"**Current Polling Strategy:** {cache[lb_key].get('mode', 'Unknown') if lb_key in cache else 'Unknown'}")
+            
+            st.divider()
+            st.write("📜 **Session Activity Log**")
+            
+            if st.button("📥 Load Remote Logs"):
+                try:
+                    res = get_supabase().table('app_logs').select('*').eq('tournament_id', str(t_id)).order('created_at', desc=True).limit(50).execute()
+                    if res.data: st.dataframe(pd.DataFrame(res.data), width="stretch", hide_index=True)
+                    else: st.info("Log table is empty.")
+                except Exception as e: st.error(f"Could not load logs: {type(e).__name__} - {e}")
+                    
+        with t7:
+            st.subheader("💻 Raw API JSON")
+            st.caption("Inspect the exact payload returned by the API for this tournament.")
+            if full_data: st.json(full_data)
+            else: st.info("No leaderboard data available from the API yet.")
+            
+        with t8:
+            raw_admin_rules = get_config(t_id, 'rules', DEFAULT_RULES)
+            st.markdown(raw_admin_rules if raw_admin_rules and raw_admin_rules.strip() else DEFAULT_RULES)
+            
+        with t9:
+            st.subheader("🏌️ Tournament Field & Top 20")
+            st.caption("This is the active field returned by the API. It updates automatically.")
+            
+            st.markdown("---")
+            
+            if is_tournament_started:
+                st.info("⛳ The tournament has started! The entry list is locked.")
+                raw_field = [p.split(" (Top 20")[0] for p in formatted_field_admin]
+                
+                if st.button("🛠️ Force Rebuild Frozen Field (Fix Top 20 Flags)", type="primary"):
+                    with st.spinner("Rebuilding Top 20 database..."): 
+                        get_formatted_field(t_id, get_top_20_players())
+                        log_to_sheet("ADMIN ACTION", "Forced rebuild of frozen field and Top 20 flags")
+                    st.success("✅ Database rebuilt and permanently frozen! Please click the 'Clear Cache' button in the sidebar.")
+            else:
+                st.subheader("🚨 Smart Field Alerts")
+                st.caption("Detect if players have been added or removed since your last check.")
+                raw_field = get_raw_entry_list(t_id)
+                
+                baseline_str = fetch_alerted_field_from_sheet(t_id)
+                baseline_field = [p.strip() for p in baseline_str.split(",")] if baseline_str else []
+                
+                if not baseline_str and raw_field:
+                    if st.button("Set Initial Baseline", type="primary"):
+                        save_alerted_field_to_sheet(t_id, ",".join(raw_field))
+                        st.rerun()
+                elif raw_field and baseline_field:
+                    added_players = list(set(raw_field) - set(baseline_field))
+                    removed_players = list(set(baseline_field) - set(raw_field))
+                    
+                    if not added_players and not removed_players: st.success("✅ The field is currently stable. No changes detected.")
+                    else:
+                        if added_players: st.write(f"**➕ Added:** {', '.join(added_players)}")
+                        if removed_players: st.write(f"**❌ Removed:** {', '.join(removed_players)}")
+                        
+                        if st.button("🚀 Send Alert Emails", type="primary"):
+                            with st.spinner("Sending emails..."):
+                                try: current_close_dt = datetime.datetime.strptime(settings.get(f"close_time_{t_id}"), "%Y-%m-%d %H:%M:%S") if settings.get(f"close_time_{t_id}") else datetime.datetime.now(datetime.timezone.utc)
+                                except (ValueError, TypeError): current_close_dt = datetime.datetime.now(datetime.timezone.utc)
+                                
+                                try:
+                                    uk_tz = pytz.timezone('Europe/London'); et_tz = pytz.timezone('America/New_York')
+                                    ct_uk = uk_tz.localize(current_close_dt); ct_et = ct_uk.astimezone(et_tz)
+                                    close_time_str_admin = f"{ct_uk.strftime('%a, %b %d at %I:%M %p')} UK / {ct_et.strftime('%a, %b %d at %I:%M %p')} ET"
+                                except Exception: close_time_str_admin = current_close_dt.strftime('%a, %b %d at %I:%M %p')
+                                
+                                emails_sent = 0
+                                alerted_emails = set()
+                                
+                                if not admin_df.empty:
+                                    name_col = next((c for c in admin_df.columns if c not in ['Sheet_Row', 'Email', 'Payment Method', 'Paid', 'Field Status', '_Original_Name'] and 'pick' not in c.lower()), admin_df.columns[2])
+                                    for _, row in admin_df.iterrows():
+                                        user_email = str(row.get('Email', '')).strip().lower()
+                                        user_name = str(row.get('_Original_Name', row.get(name_col, 'Entrant')))
+                                        if not user_email or '@' not in user_email: continue
+                                        if user_email in alerted_emails: continue 
+                                        
+                                        user_picks = [str(row[c]).split(" (Top 20")[0].strip() for c in admin_df.columns if 'pick' in c.lower() and pd.notna(row[c])]
+                                        affected_removals = [p for p in removed_players if p in user_picks]
+                                        
+                                        if affected_removals or added_players:
+                                            if send_field_change_email(user_email, user_name, affected_removals, added_players, t_key.split('(')[0], t_id, close_time_str_admin, admin_logo):
+                                                emails_sent += 1
+                                                alerted_emails.add(user_email)
+                                                time.sleep(1.5)
+                                                
+                                save_alerted_field_to_sheet(t_id, ",".join(raw_field))
+                                st.success(f"✅ Sent {emails_sent} alerts!"); st.rerun()
+
+            st.markdown("---")
+            if formatted_field_admin:
+                display_df = pd.DataFrame([{"Player": p.split(" (Top 20")[0], "Top 20 Restriction?": "✅ Yes" if "(Top 20" in p else ""} for p in formatted_field_admin])
+                st.dataframe(display_df, width="stretch", hide_index=True)
+            else: 
+                st.info("Field has not been populated by the API yet.")
+        
+        with t10:
+            st.subheader("📈 Live Traffic Analytics")
+            st.caption("Live visitor tracking powered by Umami.")
+            umami_share_url = "https://cloud.umami.is/share/eSEE741Q3wuxQygs"
+            st.html(f'<iframe src="{umami_share_url}" width="100%" height="800px" style="border:none;" scrolling="yes"></iframe>')
+
+        with t11:
+            st.subheader("🔀 Name Alias Manager")
+            st.caption("Link a player's drafted name to their official API leaderboard name to fix 'Not in Field' errors.")
+            
+            current_aliases = fetch_aliases_from_sheet(t_id)
+            alias_list = [a.strip() for a in current_aliases.split(",") if a.strip()]
+            
+            st.markdown("### Current Aliases")
+            if alias_list:
+                for idx, a in enumerate(alias_list):
+                    if ':' in a:
+                        w, c = a.split(':')
+                        colA, colB = st.columns([4, 1])
+                        with colA: st.markdown(f"**{html.escape(w.strip().title())}** ➡️ mapped to API name **{html.escape(c.strip().title())}**")
+                        with colB:
+                            if st.button("❌ Remove", key=f"rm_alias_{idx}"):
+                                alias_list.pop(idx)
+                                save_aliases_to_sheet(t_id, ",".join(alias_list))
+                                st.rerun()
+            else:
+                st.info("No aliases currently set.")
+                
+            st.markdown("---")
+            st.markdown("### Add New Alias")
+            c_wrong, c_right = st.columns(2)
+            with c_wrong: new_wrong = st.text_input("Drafted Name (e.g. Nico Echavarria)", key="new_w")
+            with c_right: new_right = st.text_input("API Name (e.g. Nicolas Echavarria)", key="new_r")
+            
+            if st.button("➕ Add Alias", type="primary"):
+                if new_wrong and new_right:
+                    new_pair = f"{new_wrong.strip()}:{new_right.strip()}"
+                    alias_list.append(new_pair)
+                    with st.spinner("Saving to DB..."):
+                        if save_aliases_to_sheet(t_id, ",".join(alias_list)):
+                            st.success("Alias added successfully!")
+                            st.rerun()
+                        else: st.error("🚨 Failed to save alias.")
+                else:
+                    st.error("🚨 Please fill out both names.")
