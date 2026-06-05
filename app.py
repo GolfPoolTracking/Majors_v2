@@ -241,7 +241,6 @@ def derive_tournament_state(lb_data, live_details, is_r4_live_mode=False, is_adm
     
     unfinished_players = [p for p in lb_data if safe_int(p.get('current_round', 0)) == current_r and normalize_pga_status(p.get('status', '')) not in ['completed', 'cut', 'wd', 'dq']]
     active_field = [p for p in lb_data if normalize_pga_status(p.get('status', '')) == 'active']
-    total_holes_live = sum(safe_int(p.get('holes_played', 0)) for p in lb_data)
     
     is_round_finished_consensus = False
     if t_status in ['completed', 'endofday']:
@@ -249,10 +248,6 @@ def derive_tournament_state(lb_data, live_details, is_r4_live_mode=False, is_adm
     elif not unfinished_players and len(lb_data) > 0:
         is_round_finished_consensus = True
     elif active_field and all(safe_int(p.get('holes_played', 0)) == 18 for p in active_field):
-        is_round_finished_consensus = True
-    elif t_status == 'active' and not active_field and not not_started_current:
-        is_round_finished_consensus = True
-    elif t_status == 'active' and total_holes_live == 0 and not active_field and not not_started_current:
         is_round_finished_consensus = True
 
     if is_round_finished_consensus and t_status not in ['completed', 'endofday', 'pre']:
@@ -294,6 +289,14 @@ def derive_tournament_state(lb_data, live_details, is_r4_live_mode=False, is_adm
         'last_group_htr': last_group_htr,
         'is_r4_fully_done': is_r4_fully_done
     }
+
+def _parse_t_start(t_start):
+    if not t_start: return None
+    if isinstance(t_start, datetime.datetime): return t_start
+    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d'):
+        try: return datetime.datetime.strptime(str(t_start), fmt)
+        except ValueError: pass
+    return None
 
 # --- CONFIG COMPATIBILITY ---
 @st.cache_data(ttl=300, show_spinner=False)
@@ -1015,6 +1018,511 @@ def fetch_smart_leaderboard(selected_t_id):
     cache[cache_key] = {"data": [], "last_fetch": now, "next_fetch_allowed": next_fetch, "mode": "offline", "full_data": {}}
     return [], next_fetch, now, {}, "❌ No Data Available"
 
+def render_roster_table(picks, p_info_lower, rounds_active, counting_map, is_live_active, round_scores, round_ranks, is_elim, current_r, hide_rank=False):
+    rows = []
+    for p in picks:
+        p_key = str(p).lower()
+        p_safe = html.escape(str(p))
+        if p_key not in p_info_lower:
+            rows.append(f"<tr><td style='padding-bottom: 5px;'>⚠️ {p_safe}</td><td colspan='{len(rounds_active)+1}' style='color:red;'>Not in Field</td></tr>")
+            continue
+        d = p_info_lower[p_key]; stt = d['status']
+        row_html = f"<tr><td style='padding-right:15px; min-width:140px; padding-bottom: 5px;'>{p_safe}</td>"
+        for r in rounds_active:
+            s = d['rounds'].get(r, None); is_cnt = p_key in counting_map.get(r, [])
+            if s is None and stt in ['cut', 'wd', 'dq']: val = f"<span style='color:#e74c3c;'>{stt.upper()}</span>"
+            elif s is None: val = "<span style='color:#7f8c8d;'>-</span>"
+            else: 
+                txt = format_score(s)
+                if is_live_active and r == current_r and stt == 'active':
+                    hp = d.get('holes_played', 0)
+                    if 0 < hp < 18:
+                        txt = f"{txt} <small>({hp})</small>"
+                        
+                if s < 0: 
+                    score_color = "#e74c3c"
+                    bg_color = "rgba(231, 76, 60, 0.15)"
+                elif s == 0: 
+                    score_color = "#2ecc71"
+                    bg_color = "rgba(46, 204, 113, 0.15)"
+                else: 
+                    score_color = "var(--text-color)"
+                    bg_color = "rgba(130, 130, 130, 0.15)"
+                
+                if is_cnt:
+                    val = f"<span style='color: {score_color}; background-color: {bg_color}; padding: 2px 6px; border-radius: 6px; font-weight: bold;'>{txt}</span>"
+                else:
+                    val = f"<span style='color: {score_color}; opacity: 0.45;'>{txt}</span>"
+                    
+            row_html += f"<td style='padding: 0 10px; padding-bottom: 5px;'>R{r}: {val}</td>"
+        
+        if stt not in ['cut', 'wd', 'dq']:
+            if d['total'] < 0: tot_col = "#e74c3c"
+            elif d['total'] == 0: tot_col = "#2ecc71"
+            else: tot_col = "var(--text-color)"
+            row_html += f"<td style='padding: 0 10px; padding-bottom: 5px; white-space: nowrap;'><b>TOT: <span style='color:{tot_col if current_r > 0 else '#7f8c8d'};'>{format_score(d['total']) if current_r > 0 else '-'}</span></b></td>"
+        else: 
+            row_html += f"<td style='padding: 0 10px; padding-bottom: 5px; white-space: nowrap;'><b>TOT: <span style='color:#e74c3c;'>{stt.upper()}</span></b></td>"
+            
+        row_html += "</tr>"; rows.append(row_html)
+        
+    tot_html = "<tr><td style='padding-right:15px; border-top: 1px solid var(--border-color); padding-top: 8px;'><b>TOTAL (POS)</b></td>"
+    for r in rounds_active:
+        if is_elim and r >= 3: tot_html += f"<td style='padding: 0 10px; border-top: 1px solid var(--border-color); padding-top: 8px;'><b style='color:red;'>CUT</b></td>"
+        else:
+            r_score = round_scores.get(r, 0)
+            if r_score < 0: r_col = "#e74c3c"
+            elif r_score == 0: r_col = "#2ecc71"
+            else: r_col = "var(--text-color)"
+            
+            s_txt = f"<span style='color: {r_col};'>{format_score(r_score)}</span>" if current_r > 0 else "-"
+            rank_display = round_ranks.get(r, '-') if (current_r > 0 and not hide_rank) else '-'
+            tot_html += f"<td style='padding: 0 10px; border-top: 1px solid var(--border-color); padding-top: 8px;'><b>{s_txt}</b> <small>({rank_display})</small></td>"
+            
+    tot_html += "<td></td></tr>"; rows.append(tot_html)
+    return f"<div style='overflow-x: auto;'><table style='width:100%; border-collapse:collapse; font-family:monospace; font-size: 0.95em;'>{''.join(rows)}</table></div>"
+
+def get_clean_entries(t_id, public_mode, valid_players=[], dns_players=[], email_filter=None):
+    if not t_id: return pd.DataFrame(), 0
+    try:
+        df = get_raw_sheet_data(t_id)
+        if df.empty or len(df.columns) < 2: return pd.DataFrame(), 0
+        total_entries = len(df)
+        
+        if email_filter:
+            if 'Email' in df.columns: df = df[df['Email'].astype(str).str.lower().str.strip() == email_filter.lower().strip()].copy()
+            else: return pd.DataFrame(), total_entries
+
+        name_col = 'Name'
+        df['_Original_Name'] = df[name_col]
+        df['_name_lower'] = df[name_col].astype(str).str.lower().str.strip()
+        df = df.sort_values('Sheet_Row')
+        df['_total_entries'] = df.groupby('_name_lower')['_name_lower'].transform('count')
+        df['_entry_num'] = df.groupby('_name_lower').cumcount() + 1
+        
+        def format_admin_name(r):
+            base = str(r['_Original_Name']).strip()
+            return f"{base} (Team {r['_entry_num']})" if r['_total_entries'] > 1 else base
+            
+        df[name_col] = df.apply(format_admin_name, axis=1)
+        df = df.drop(columns=['_name_lower', '_entry_num', '_total_entries'])
+
+        if valid_players or dns_players:
+            stt = []; v_low = [p.strip().lower() for p in valid_players]; d_low = [p.strip().lower() for p in dns_players]
+            pick_cols = ['Pick 1', 'Pick 2', 'Pick 3', 'Pick 4', 'Pick 5']
+
+            for _, row in df.iterrows():
+                inv = []; wrn = []
+                for col in pick_cols:
+                    if col in df.columns:
+                        p = str(row[col]).split(" (Top 20")[0].strip()
+                        if p and p.lower() != 'nan':
+                            l = p.lower()
+                            if l in d_low: wrn.append(p)
+                            elif l not in v_low: inv.append(p)
+                msgs = []
+                if inv: msgs.append(f"❌ {', '.join(inv)} not in field")
+                if wrn: msgs.append(f"⚠️ {', '.join(wrn)} DNS")
+                stt.append("✅ All Valid" if not msgs else " | ".join(msgs))
+            df.insert(df.columns.get_loc(name_col)+1, "Field Status", stt)
+        
+        desired_order = [name_col, 'Email', 'Payment Method', 'Paid']
+        if "Field Status" in df.columns: desired_order.append("Field Status")
+        desired_order.append('Tie Breaker')
+        desired_order.extend(['Pick 1', 'Pick 2', 'Pick 3', 'Pick 4', 'Pick 5'])
+        
+        remaining_cols = [c for c in df.columns if c not in desired_order]
+        df = df[desired_order + remaining_cols]
+        
+        df['_sort_name'] = df[name_col].astype(str).str.lower()
+        if "Field Status" in df.columns:
+            df['_has_error'] = df['Field Status'].apply(lambda x: 0 if str(x).strip().startswith("✅") else 1)
+            df = df.sort_values(by=['_has_error', '_sort_name'], ascending=[False, True]).drop(columns=['_has_error', '_sort_name'])
+        else:
+            df = df.sort_values(by=['_sort_name'], ascending=[True]).drop(columns=['_sort_name'])
+        df.index = range(1, len(df) + 1)
+        return df, total_entries
+    except Exception as e:
+        st.session_state.setdefault("api_log", []).append(f"Error building UI entry grid: {type(e).__name__} - {e}")
+        return pd.DataFrame(), 0
+
+def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", valid_players=None, logo_url=None, is_admin_download=False, header_only=False, is_admin_view=False, hide_title=False, search_query=""):
+    try:
+        lb_data, next_f, last_f, full_data, data_source = fetch_smart_leaderboard(t_id)
+        
+        raw_results = full_data.get('results') or {}
+        tourney_data = raw_results.get('tournament') or {}
+        live_details = tourney_data.get('live_details') or {}
+        
+        state = derive_tournament_state(lb_data, live_details, is_r4_live_mode=False, is_admin_view=is_admin_view)
+        t_status = state['t_status']
+        current_r = state['current_r']
+        sweep_max_round = state['sweep_max_round']
+        is_round_finished_consensus = state['is_round_finished_consensus']
+        last_group_teed_off = state['last_group_teed_off']
+        last_group_htr = state['last_group_htr']
+        is_r4_fully_done = state['is_r4_fully_done']
+            
+        p_info = {}
+        dns_list = [n.strip().lower() for n in str(dns_input).split(",")] if dns_input else []
+
+        for p in lb_data:
+            name = f"{p['first_name']} {p['last_name']}".strip()
+            name_lower = name.lower()
+            norm_status = normalize_pga_status(p.get('status', ''))
+            final_status = 'wd' if name_lower in dns_list else norm_status
+            
+            try: strokes = [safe_int(rd.get('strokes', 0)) for rd in p.get('rounds', [])]
+            except (ValueError, TypeError): strokes = [0]*4
+                
+            rds = {}
+            if final_status not in ['wd', 'dq']:
+                for i, rd in enumerate(p.get('rounds', [])):
+                    r_num = rd.get('round_number')
+                    if not r_num or r_num > sweep_max_round: continue 
+                    s = strokes[i]
+                    if s > 0: rds[r_num] = (s - par_override) if (par_override > 0 and s > 40) else safe_int(rd.get('total_to_par', 0))
+                
+                if final_status == 'active' and sweep_max_round == current_r:
+                    hp = safe_int(p.get('holes_played', 0))
+                    api_total = safe_int(p.get('total_to_par', 0))
+                    api_past_total = get_corrected_past_total(p, current_r, par_override)
+                    
+                    has_started = (hp > 0) or (api_total != api_past_total)
+                    if has_started:
+                        rds[current_r] = api_total - api_past_total
+                        
+            if final_status in ['wd', 'dq']: final_total = 999
+            elif final_status == 'cut': final_total = safe_int(p.get('total_to_par', 0))
+            else:
+                if sweep_max_round == current_r and final_status == 'active':
+                    api_total = safe_int(p.get('total_to_par', 0))
+                    if par_override > 0:
+                        api_past_total = get_corrected_past_total(p, current_r, par_override)
+                        final_total = sum([rds.get(x, 0) for x in range(1, current_r)]) + (api_total - api_past_total)
+                    else: final_total = api_total
+                else: final_total = sum(rds.values())
+                
+            p_info[name] = {'status': final_status, 'rounds': rds, 'total': final_total, 'holes_played': safe_int(p.get('holes_played', 0))}
+            
+        if dns_input:
+            for dns_name in str(dns_input).split(","):
+                clean_dns = dns_name.strip()
+                if not clean_dns: continue
+                if clean_dns not in p_info: p_info[clean_dns] = {'status': 'wd', 'rounds': {}, 'total': 999, 'holes_played': 0}
+        
+        p_info_lower = {k.lower(): v for k, v in p_info.items()}
+        
+        alias_str = fetch_aliases_from_sheet(t_id)
+        if alias_str:
+            for pair in alias_str.split(','):
+                if ':' in pair:
+                    wrong, correct = pair.split(':')
+                    wrong, correct = wrong.strip().lower(), correct.strip().lower()
+                    if correct in p_info_lower:
+                        p_info_lower[wrong] = p_info_lower[correct]
+            
+        if current_r == 0 or t_status == 'pre':
+            for vp in (valid_players or []):
+                if vp.lower() not in p_info_lower: p_info_lower[vp.lower()] = {'status': 'active', 'rounds': {}, 'total': 0, 'holes_played': 0}
+        
+        win_score = 0
+        if sweep_max_round > 0:
+            active_scores = [v['total'] for v in p_info_lower.values() if v['status'] in ['active', 'completed', 'cut', 'endofday', 'pre'] and v['total'] != 999]
+            if active_scores: win_score = min(active_scores)
+            
+        hide_rank = (t_status == 'pre' or current_r == 0) or (current_r == 1 and t_status not in ['endofday', 'completed'])
+        
+        if t_status == 'completed' or (current_r == 4 and (is_r4_fully_done or last_group_htr >= 18)):
+            if t_status == 'completed':
+                status_txt = f"Tournament Finished | Winning Score: {format_score(win_score)}"
+            else:
+                status_txt = "All players finished: Final Result Being Checked!"
+        elif t_status == 'pre':
+            _dt = _parse_t_start(t_start)
+            status_txt = f"Waiting for R1 to start... ⏳ ({_dt.strftime('%d %b %y')})" if _dt else "Waiting for R1 to start... ⏳"
+        elif t_status == 'suspended':
+            status_txt = f"Play Suspended (R{current_r})"
+        elif t_status == 'endofday':
+            status_txt = f"R{current_r} Completed"
+        else: 
+            if current_r == 4:
+                if not last_group_teed_off: status_txt = "R4 In-Play | Live scoring will begin once all players tee off"
+                else: status_txt = f"R4 In-Play | Leader: {format_score(win_score)} | Last Group Thru: {last_group_htr}"
+            else: status_txt = f"R{current_r} In-Play"
+            
+        if not is_admin_download:
+            if logo_url:
+                st.markdown(f"<div style='text-align: center; padding-bottom: 10px;'><img src='{safe_url(logo_url)}' style='max-width: 250px; max-height: 150px; width: 100%; object-fit: contain;'></div>", unsafe_allow_html=True)
+            elif not hide_title:
+                st.header(f"🏆 {html.escape(str(t_name).split('(')[0])}")
+
+            if t_status != 'pre' and current_r > 0:
+                if t_status == 'completed':
+                    status_bar_html = f"<div class='compact-container' style='display: flex; justify-content: center; align-items: center; padding: 12px;'><div style='font-weight: bold; font-size: 1.15em; color: #2ecc71;'>🏆 {html.escape(str(status_txt))}</div></div>"
+                    st.markdown(status_bar_html, unsafe_allow_html=True)
+                else:
+                    last_ts = int(last_f.timestamp() * 1000) if last_f else 0
+                    next_ts = int(next_f.timestamp() * 1000) if next_f else 0
+
+                    status_html = f"""
+                    <!DOCTYPE html>
+                    <html>
+                    <head>
+                    <style>
+                        body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: transparent; padding: 2px; }}
+                        .box {{ text-align: center; border-radius: 6px; padding: 10px; border: 1px solid rgba(130, 130, 130, 0.4); background-color: #f8f9fa; color: #2c3e50; }}
+                        @media (prefers-color-scheme: dark) {{
+                            .box {{ background-color: #262730; color: #FAFAFA; border-color: rgba(255, 255, 255, 0.2); }}
+                        }}
+                        .title {{ font-weight: bold; font-size: 1.05em; }}
+                        .row {{ display: flex; flex-wrap: wrap; justify-content: center; gap: 15px; margin-top: 6px; font-size: 0.95em; }}
+                    </style>
+                    </head>
+                    <body>
+                        <div class="box">
+                            <div class="title">⛳ {html.escape(str(status_txt))}</div>
+                            <div class="row">
+                                <span>🕒 <b>Last Check:</b> <span id="t-last">...</span></span>
+                                <span>⏳ <b>Next Check:</b> <span id="t-next">...</span></span>
+                            </div>
+                        </div>
+                        <script>
+                            function fmt(ts) {{
+                                if (!ts) return "Unknown";
+                                return new Date(ts).toLocaleString([], {{ weekday: "short", hour: "numeric", minute: "2-digit", hour12: true, timeZoneName: "short" }});
+                            }}
+                            document.getElementById("t-last").innerText = fmt({last_ts});
+                            document.getElementById("t-next").innerText = fmt({next_ts});
+                        </script>
+                    </body>
+                    </html>
+                    """
+                    st.iframe(status_html, height=85)
+                
+        if header_only: return
+
+        if not t_id: return pd.DataFrame() if is_admin_download else None
+            
+        df_resp = get_raw_sheet_data(t_id)
+        if df_resp.empty or len(df_resp.columns) < 2: 
+            if is_admin_download: return pd.DataFrame()
+            st.info("No entries have been submitted yet."); return None
+        
+        name_col = 'Name'
+        df_resp['_name_lower'] = df_resp[name_col].astype(str).str.lower().str.strip()
+        df_resp['_total_entries'] = df_resp.groupby('_name_lower')['_name_lower'].transform('count')
+        df_resp['_entry_num'] = df_resp.groupby('_name_lower').cumcount() + 1
+        
+        def make_display_name(r):
+            base = html.escape(str(r[name_col]).strip())
+            if r['_total_entries'] > 1:
+                return f"{base} <span style='font-size: 0.75em; background-color: rgba(130, 130, 130, 0.25); padding: 2px 6px; border-radius: 10px; margin-left: 6px; font-weight: normal; vertical-align: middle;'>Team {r['_entry_num']}</span>"
+            return base
+
+        def make_export_name(r):
+            base = str(r[name_col]).strip()
+            return f"{base} (Team {r['_entry_num']})" if r['_total_entries'] > 1 else base
+            
+        df_resp['_Display_Name'] = df_resp.apply(make_display_name, axis=1)
+        df_resp[name_col] = df_resp.apply(make_export_name, axis=1)
+        
+        pick_cols = ['Pick 1', 'Pick 2', 'Pick 3', 'Pick 4', 'Pick 5']
+        r_range = list(range(1, sweep_max_round + 1)) if sweep_max_round > 0 else [1]
+        
+        results = []
+        for _, row in df_resp.iterrows():
+            picks = [str(row[c]).split(" (Top 20")[0].strip() for c in pick_cols if c in df_resp.columns][:5]
+            sheet_warns = []
+            
+            total = 0; c_map = {}; r_sc = {}; cum_sc = {}; running = 0
+            for r in r_range:
+                p_scores = []
+                for p in picks:
+                    p_key = p.lower()
+                    if p_key in p_info_lower:
+                        if r in p_info_lower[p_key]['rounds']: score = p_info_lower[p_key]['rounds'][r]
+                        elif p_info_lower[p_key]['status'] in ['cut', 'wd', 'dq']: score = 99
+                        else: score = 0 
+                    else: score = 99
+                    p_scores.append((p_key, score))
+                
+                p_scores.sort(key=lambda x: int(x[1]))
+                top_4 = p_scores[:4]; c_map[r] = [x[0] for x in top_4]
+                r_sum = sum(int(x[1]) for x in top_4)
+                r_sc[r] = r_sum; running += r_sum; cum_sc[r] = running; total += r_sum
+                
+            cut_made = (current_r > 2) or (current_r == 2 and is_round_finished_consensus)
+            elim = (cut_made and sum(1 for p in picks if p.lower() in p_info_lower and p_info_lower[p.lower()]['status'] not in ['cut','wd','dq']) < 4)
+            
+            t_val = extract_tie_breaker(row['Tie Breaker']) if 'Tie Breaker' in row else 0
+            
+            results.append({"Participant": str(row[name_col]), "DisplayName": str(row['_Display_Name']), "Total": total, "Elim": elim, "Picks": picks, "CMap": c_map, "RSc": r_sc, "Cum": cum_sc, "Diff": abs(t_val - win_score), "Tie": t_val, "SheetWarnings": sheet_warns})
+
+        if not results:
+            if is_admin_download: return pd.DataFrame()
+            st.info("No entries have been submitted yet."); return None
+
+        df = pd.DataFrame(results)
+        if hide_rank:
+            df = df.sort_values(by="Participant", key=lambda x: x.astype(str).str.lower()).reset_index(drop=True)
+            df['DRank'] = "-"
+        else:
+            df = df.sort_values(by=["Elim", "Total", "Diff", "Participant"], ascending=[True, True, True, True]).reset_index(drop=True)
+            dr = []; cr = 1
+            for i in range(len(df)):
+                if i > 0 and df.iloc[i]['Elim'] == df.iloc[i-1]['Elim'] and df.iloc[i]['Total'] == df.iloc[i-1]['Total'] and df.iloc[i]['Diff'] == df.iloc[i-1]['Diff']:
+                    dr.append(f"T{cr}")
+                    if not str(dr[i-1]).startswith("T"): dr[i-1] = f"T{cr}"
+                else: cr = i + 1; dr.append(str(cr))
+            df['DRank'] = dr
+
+        history_ranks = {idx: {} for idx in df.index}
+        for r in r_range:
+            sorted_indices = sorted(df.index, key=lambda x: df.loc[x, 'Cum'].get(r, 9999))
+            rank_start = 1
+            for k, idx in enumerate(sorted_indices):
+                score = df.loc[idx, 'Cum'].get(r, 9999)
+                if k > 0 and score == df.loc[sorted_indices[k-1], 'Cum'].get(r, 9999):
+                    r_str = f"T{rank_start}"
+                    prev_idx = sorted_indices[k-1]
+                    if not history_ranks[prev_idx].get(r, "").startswith("T"): history_ranks[prev_idx][r] = f"T{rank_start}"
+                else: rank_start = k + 1; r_str = str(rank_start)
+                history_ranks[idx][r] = r_str
+
+        if is_admin_download: return df 
+        
+        if t_status == 'completed' and not is_admin_view and not header_only:
+            if not st.session_state.get(f"balloons_{t_id}"):
+                st.balloons(); st.session_state[f"balloons_{t_id}"] = True
+                
+            settings_cache = get_settings_cache()
+            conf = settings_cache.get(f"payout_confirmed_{t_id}", False)
+            
+            prize_pool = [
+                float(settings_cache.get(f"payout_1_{t_id}") or 0),
+                float(settings_cache.get(f"payout_2_{t_id}") or 0),
+                float(settings_cache.get(f"payout_3_{t_id}") or 0)
+            ]
+            
+            if not df.empty:
+                podium_players = []
+                current_prizes_used = 0
+                grouped_ranks = {}
+                
+                for _, row in df.iterrows():
+                    r_str = str(row.get('DRank', '-'))
+                    if r_str == '-': continue
+                    if r_str not in grouped_ranks: grouped_ranks[r_str] = []
+                    grouped_ranks[r_str].append(html.escape(str(row['Participant'])))
+                
+                for r_str, names in grouped_ranks.items():
+                    match = re.search(r'\d+', r_str)
+                    if not match: continue
+                    base_r = int(match.group())
+                    
+                    if current_prizes_used >= 3: break 
+                        
+                    n_players = len(names)
+                    prizes_to_take = min(n_players, 3 - current_prizes_used)
+                    
+                    total_cash = 0
+                    for _ in range(prizes_to_take):
+                        total_cash += prize_pool[current_prizes_used]
+                        current_prizes_used += 1
+                        
+                    payout = total_cash / n_players if n_players > 0 else 0
+                    
+                    for name in names:
+                        podium_players.append({"name": name, "rank": base_r, "payout": payout})
+                
+                r1_players = [p for p in podium_players if p['rank'] == 1]
+                r2_players = [p for p in podium_players if p['rank'] == 2]
+                r3_players = [p for p in podium_players if p['rank'] == 3]
+                
+                display_order = r2_players + r1_players + r3_players
+                    
+                podium_styles = {
+                    1: {"medal": "🥇", "bg": "linear-gradient(145deg, #fffbeb, #fef08a)", "border": "#fde047", "padding": "25px 10px 15px", "sz": "2.8em", "z": "3", "shadow": "box-shadow: 0 -4px 10px rgba(0,0,0,0.1);", "mw": "160px"},
+                    2: {"medal": "🥈", "bg": "linear-gradient(145deg, #f8f9fa, #e2e8f0)", "border": "#cbd5e1", "padding": "15px 10px", "sz": "2.2em", "z": "2", "shadow": "", "mw": "140px"},
+                    3: {"medal": "🥉", "bg": "linear-gradient(145deg, #fff7ed, #ffedd5)", "border": "#fed7aa", "padding": "10px", "sz": "1.8em", "z": "1", "shadow": "", "mw": "140px"}
+                }
+                
+                html_blocks = []
+                for p in display_order:
+                    s = podium_styles.get(p['rank'], podium_styles[3]) 
+                    pz_str = ""
+                    if conf and p['payout'] > 0:
+                        cash_str = f"{p['payout']:,.2f}".replace(".00", "") 
+                        pz_str = f"<br><span style='color:#27ae60; font-size:1.1em;'><b>${cash_str}</b></span>"
+                        
+                    block = f"<div style='flex: 1; max-width: {s['mw']}; background: {s['bg']}; border-radius: 8px 8px 0 0; padding: {s['padding']}; margin: 0 4px; border: 1px solid {s['border']}; border-bottom: none; position: relative; z-index: {s['z']}; {s['shadow']}'><div style='font-size: {s['sz']}; margin-bottom: 5px;'>{s['medal']}</div><div style='font-size: 0.9em; font-weight: bold; color: #475569; word-wrap: break-word;'>{p['name']}</div>{pz_str}</div>"
+                    html_blocks.append(block)
+                
+                final_html = "<div style='display: flex; justify-content: center; align-items: flex-end; margin: 20px 0 0px 0; text-align: center; font-family: sans-serif;'>" + "".join(html_blocks) + "</div><div style='height: 4px; background-color: #2c3e50; margin-bottom: 30px; border-radius: 2px;'></div>"
+                
+                st.markdown(final_html, unsafe_allow_html=True)
+        
+        if search_query:
+            df = df[df['Participant'].str.contains(search_query, case=False, na=False)]
+            if df.empty:
+                st.warning("🔍 No entries found matching your search.")
+        
+        is_live_active_now = (sweep_max_round == current_r and t_status == 'active')
+
+        max_name_len = max([len(str(n)) for n in df['Participant']]) if not df.empty else 15
+        name_min_width = max(max_name_len * 8, 110) 
+
+        leaderboard_html = "<div style='display: flex; flex-direction: column; gap: 4px; overflow-x: auto;'>"
+
+        if not hide_rank:
+            legend_html = f"<div style='display: grid; grid-template-columns: 34px 40px {name_min_width}px 80px auto; gap: 8px; width: max-content; font-size: 0.85em; color: var(--text-color); opacity: 0.7; margin-bottom: 2px;'><div></div><div></div><div></div><div style='white-space: nowrap;'>🏌️‍♂️ Score (Tie)</div><div></div></div>"
+            leaderboard_html += legend_html
+        
+        for i, row in df.iterrows():
+            d = row['DRank']
+            
+            if hide_rank: lbl_val = "-"
+            elif t_status == 'completed': lbl_val = "🥇" if d in ["1","T1"] else "🥈" if d in ["2","T2"] else "🥉" if d in ["3","T3"] else f"#{d}"
+            else: lbl_val = f"#{d}"
+            
+            score_txt = format_score(row['Total']) if not hide_rank else "-"
+            warn_list = []
+            vp_lower = [v.lower() for v in valid_players] if valid_players else []
+            api_data_loaded = len(p_info_lower) > 0
+            
+            for p in row['Picks']:
+                p_key = p.lower()
+                if not api_data_loaded: pass 
+                elif p_key not in p_info_lower: warn_list.append(html.escape(f"Invalid Pick: {p}"))
+                elif vp_lower and p_key not in vp_lower:
+                    if p_info_lower[p_key]['status'] not in ['cut', 'wd', 'dq']: warn_list.append(html.escape(f"Possible WD/DNS: {p}"))
+            
+            for w in row['SheetWarnings']: warn_list.append(html.escape(str(w)))
+            warn_list = list(dict.fromkeys(warn_list))
+            
+            if row['Elim']: 
+                score_block = "<div style='color: #e74c3c; font-weight: bold; white-space: nowrap;'>❌ CUT</div>"
+            else: 
+                score_color = '#2ecc71' 
+                score_block = f"<div style='white-space: nowrap;'><b style='color: {score_color};'>{score_txt}</b> <span style='color: var(--text-color); opacity: 0.6; font-size: 0.9em;'>({html.escape(str(row['Tie']))})</span></div>"
+                
+            warn_html = f"<div style='color: #e67e22; font-size: 0.85em; white-space: nowrap;'>⚠️ {' | '.join(warn_list)}</div>" if warn_list else "<div></div>"
+            
+            table_html = render_roster_table(row['Picks'], p_info_lower, r_range, row['CMap'], is_live_active_now, row['RSc'], history_ranks[i], row['Elim'], current_r, hide_rank)
+            
+            summary_html = f"<div style='display: grid; grid-template-columns: 40px {name_min_width}px 80px auto; gap: 8px; align-items: center; width: max-content;'><div style='font-weight: bold;'>{lbl_val}</div><div style='font-weight: bold; white-space: nowrap;'>{row['DisplayName']}</div>{score_block}{warn_html}</div>"
+            
+            leaderboard_html += f"<details><summary>{summary_html}</summary><div class='expanded-content'>{table_html}</div></details>"
+            
+        leaderboard_html += "</div>"
+        
+        st.markdown(leaderboard_html, unsafe_allow_html=True)
+        
+    except Exception as e: 
+        st.error(f"Error calculating leaderboard: {type(e).__name__} - {e}")
+        return pd.DataFrame() if is_admin_download else None
+
 def render_pga_leaderboard(lb_data, full_data, tourney_id, view_mode, par_override=0, hide_tt=False):
     if not lb_data: st.info("No tournament data available yet."); return
 
@@ -1118,7 +1626,9 @@ if is_public:
     raw_results = get_safe_api_results(full_data)
     tourney_data = raw_results.get('tournament') or {}
     live_details = tourney_data.get('live_details') or {}
-    t_status = normalize_pga_status(live_details.get('status', ''))
+    
+    state = derive_tournament_state(lb_data, live_details)
+    t_status = state['t_status']
     is_tournament_started = t_status != 'pre'
     
     tnm = tourney_data.get('name', 'Tournament')
@@ -1230,7 +1740,7 @@ if is_public:
         formatted_field = [x.strip() for x in backup_str.split(',')] if backup_str else []
         
     valid_p = [p.split(" (Top 20")[0] for p in formatted_field]
-    full_df, total_count = get_clean_entries(tid, True, valid_players=valid_p, dns_players=public_dns.split(","))
+    full_df, total_count = get_clean_entries(tid, True, valid_players=valid_p, dns_players=str(public_dns or "").split(","))
     
     raw_token = st.query_params.get("magic_token")
     magic_token = raw_token[0] if isinstance(raw_token, list) else raw_token
@@ -1395,7 +1905,7 @@ if is_public:
                             sub_sig = f"{form_email}_{p1}_{p2}_{p3}_{p4}_{p5}"
                             if st.session_state.get(f"last_sub_{tid}") == sub_sig:
                                 st.session_state[f"success_{tid}"] = True
-                                rerun()
+                                st.rerun()
                             
                             st.session_state[f"last_sub_{tid}"] = sub_sig
                             final_payment = form_payment
@@ -1511,7 +2021,7 @@ if is_public:
                         email_input = st.text_input("Email Address:", placeholder="e.g., name@example.com")
                     
                 if email_input:
-                    user_df, _ = get_clean_entries(tid, True, valid_players=valid_p, dns_players=public_dns.split(","), email_filter=email_input)
+                    user_df, _ = get_clean_entries(tid, True, valid_players=valid_p, dns_players=str(public_dns or "").split(","), email_filter=email_input)
                     if not user_df.empty:
                         st.success(f"Found {len(user_df)} team(s) linked to this email.")
                         
@@ -1745,7 +2255,7 @@ else:
             st.info(f"**Current DNS:** {current_dns if current_dns else 'None'}")
             dns_input = st.text_input("Player Name", placeholder="Jake Knapp or -Jake Knapp")
             if st.button("🔄 Update DNS List", width="stretch") and dns_input:
-                dns_list = [p.strip() for p in current_dns.split(",")] if current_dns else []
+                dns_list = [p.strip() for p in str(current_dns or "").split(",")] if current_dns else []
                 action_name = dns_input.strip()
                 if action_name.startswith("-"):
                     dns_list = [p for p in dns_list if p.lower() != action_name[1:].strip().lower()]
@@ -1827,483 +2337,4 @@ else:
                     alert_html = f"""
                     <div style="background-color: rgba(46, 204, 113, 0.15); padding: 12px; border-radius: 6px; border-left: 4px solid #2ecc71; margin-top: 15px; margin-bottom: 15px;">
                         <div style="color: #27ae60; font-weight: bold; margin-bottom: 5px;">✅ Standard Deadline Confirmed</div>
-                        <div style="font-size: 0.95em;">🇬🇧 UK Time: <b>{preview_uk.strftime('%I:%M %p')}</b> on {preview_uk.strftime('%b %d')}</div>
-                        <div style="font-size: 0.95em;">🇺🇸 US ET: <b>{preview_et.strftime('%I:%M %p')}</b> on {preview_et.strftime('%b %d')}</div>
-                    </div>
-                    """
-                else:
-                    alert_html = f"""
-                    <div style="background-color: rgba(230, 126, 34, 0.15); padding: 12px; border-radius: 6px; border-left: 4px solid #e67e22; margin-top: 15px; margin-bottom: 15px;">
-                        <div style="color: #d35400; font-weight: bold; margin-bottom: 5px;">⚠️ Warning: Non-Standard Deadline</div>
-                        <div style="font-size: 0.9em; margin-bottom: 8px;">Entries are <b>not</b> set to close at Midnight ET. Are you sure you want to use this time?</div>
-                        <div style="font-size: 0.95em;">🇬🇧 UK Time: <b>{preview_uk.strftime('%I:%M %p')}</b> on {preview_uk.strftime('%b %d')}</div>
-                        <div style="font-size: 0.95em;">🇺🇸 US ET: <b>{preview_et.strftime('%I:%M %p')}</b> on {preview_et.strftime('%b %d')}</div>
-                    </div>
-                    """
-                st.markdown(alert_html, unsafe_allow_html=True)
-            except Exception: pass
-            
-            if st.button("💾 Save Tournament Dates", type="primary", use_container_width=True):
-                close_str = datetime.datetime.combine(close_d, close_t).strftime("%Y-%m-%d %H:%M:%S")
-                reveal_str = datetime.datetime.combine(reveal_d, reveal_t).strftime("%Y-%m-%d %H:%M:%S")
-                
-                with st.spinner("Saving to database..."):
-                    update_config(t_id, 'close_time', close_str)
-                    update_config(t_id, 'reveal_time', reveal_str)
-                    
-                st.success("✅ Dates saved securely! They will not change unless you click this again.")
-            
-            p_url = f"{BASE_URL}?view=public&tourney_id={t_id}"
-                
-            st.markdown("---")
-            st.write("🔗 **Public Sharing Link**")
-            st.code(p_url)
-            
-            if st.button("👀 Preview Public Leaderboard", type="primary", use_container_width=True):
-                st.query_params.clear()
-                st.query_params["view"] = "public"
-                st.query_params["tourney_id"] = str(t_id)
-                st.rerun()
-                
-            saved_short_url = fetch_short_url_from_sheet(t_id)
-            
-            if saved_short_url:
-                st.success("✨ Anonymous Short Link Ready!")
-                st.code(saved_short_url)
-                if st.button("🗑️ Reset Short Link"): 
-                    save_short_url_to_sheet(t_id, "")
-                    st.rerun()
-            else:
-                if st.button("✨ Generate Anonymous Short Link"):
-                    with st.spinner("Generating short link..."):
-                        short_link = generate_short_link(p_url)
-                        if short_link: 
-                            save_short_url_to_sheet(t_id, short_link)
-                            st.success("Created!")
-                            st.rerun()
-                        else: 
-                            st.error("Failed to generate link.")
-                            
-            if st.button("🔄 Clear Cache"): get_api_cache().clear(); st.cache_data.clear(); get_raw_sheet_data.clear(); st.rerun()
-
-    if t_id:
-        admin_logo = fetch_logo_from_sheet(t_id)
-        t_name_display = t_key.split('(')[0].strip() if t_key else "Tournament"
-        logo_rendered = False
-        
-        if admin_logo:
-            try:
-                st.markdown(f"<div style='text-align: center; padding-bottom: 10px;'><img src='{safe_url(admin_logo)}' style='max-width: 250px; max-height: 150px; width: 100%; object-fit: contain;'></div>", unsafe_allow_html=True)
-                logo_rendered = True
-            except Exception: pass 
-
-        if not logo_rendered:
-            st.markdown(f"<h1 style='text-align: center; padding-bottom: 10px;'>🏆 {html.escape(str(t_name_display))}</h1>", unsafe_allow_html=True)
-
-        t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11 = st.tabs(["🏆 Leaderboard", "📝 Entries", "💵 Financials", "⛳ Official PGA Scores", "💾 Export", "📡 API Status", "💻 Raw JSON", "📜 Rules", "🏌️ Field", "📈 Analytics", "🔀 Aliases"])
-        
-        lb_data, next_f, last_f, full_data, data_source = fetch_smart_leaderboard(t_id)
-        
-        raw_results = get_safe_api_results(full_data)
-        tourney_data = raw_results.get('tournament') or {}
-        live_details = tourney_data.get('live_details') or {}
-        t_status = normalize_pga_status(live_details.get('status', ''))
-        is_tournament_started = t_status != 'pre'
-        
-        top20_cached_admin = get_top_20_players()
-        
-        if not is_tournament_started:
-            formatted_field_admin = get_formatted_field(t_id, top20_cached_admin)
-        else:
-            backup_str = fetch_field_backup_from_sheet(t_id)
-            formatted_field_admin = [x.strip() for x in backup_str.split(',')] if backup_str else []
-            
-        valid_p = [p.split(" (Top 20")[0] for p in formatted_field_admin]
-        
-        with t1: 
-            if "Memory" in data_source: st.info(f"**Data Source:** {data_source}")
-            elif "Live" in data_source: st.success(f"**Data Source:** {data_source}")
-            else: st.warning(f"**Data Source:** {data_source}")
-            
-            admin_lb_tab, pub_lb_tab = st.tabs(["🕵️‍♂️ Admin View (Live Scoring)", "🌍 Public View (Delayed)"])
-            with admin_lb_tab:
-                calculate_leaderboard(t_id, t_key, t_start, par_override=current_par_override, dns_input=current_dns, valid_players=valid_p, is_admin_view=True, hide_title=True)        
-            with pub_lb_tab:
-                calculate_leaderboard(t_id, t_key, t_start, par_override=current_par_override, dns_input=current_dns, valid_players=valid_p, is_admin_view=False, hide_title=True)        
-        
-        admin_df, admin_count = get_clean_entries(t_id, False, valid_p, current_dns.split(","))
-        edited_df = pd.DataFrame()
-        
-        with t2: 
-            st.metric("🎟️ Total Entries", admin_count)
-            if not admin_df.empty:
-                st.caption("Check the 'Paid' box for users and hit Save to securely write to Supabase.")
-                top_button_container = st.container()
-                disabled_cols = [c for c in admin_df.columns if c != 'Paid']
-                
-                edited_df = st.data_editor(admin_df, width="stretch", hide_index=True, disabled=disabled_cols, column_config={"Sheet_Row": None, "_Original_Name": None, "Paid": st.column_config.CheckboxColumn("Paid?", default=False)})
-                
-                with top_button_container:
-                    if st.button("💾 Save Payment Statuses", type="primary", width="stretch"):
-                        with st.spinner("Writing to Database..."):
-                            diffs = edited_df[edited_df['Paid'] != admin_df['Paid']]
-                            if not diffs.empty:
-                                success = True
-                                for idx, row in diffs.iterrows():
-                                    if not update_paid_status(t_id, row['Sheet_Row'], row['Paid']): success = False
-                                    else: log_to_sheet("ADMIN ACTION", f"Marked {'Paid' if row['Paid'] else 'Unpaid'} for {row.get('_Original_Name', 'Unknown')}")
-                                if success: st.success("✅ Payment statuses successfully saved to DB! Your financials are locked in.")
-                                else: st.error("🚨 Encountered an error updating some rows.")
-                            else: st.info("No changes to save.")
-                        
-                st.markdown("---")
-                st.markdown("### 🛠️ Quick Edits (Payment & Picks)")
-                name_col = next((c for c in admin_df.columns if c not in ['Sheet_Row', 'Email', 'Payment Method', 'Paid', 'Tie', 'Picks', 'Field Status', 'SheetWarnings', 'Tie Breaker'] and 'pick' not in c.lower()), admin_df.columns[2])
-                team_opts = [""] + [f"{r[name_col]} (Current: {r.get('Payment Method', 'Unknown')})" for i, r in admin_df.iterrows()]
-                
-                target_team_str = st.selectbox("Select Team to Update:", team_opts)
-                
-                if target_team_str:
-                    target_name = target_team_str.split(" (Current:")[0]
-                    target_row = admin_df[admin_df[name_col] == target_name].iloc[0]
-                    st.markdown(f"**Editing:** `{html.escape(str(target_name))}`")
-                    
-                    c1, c2 = st.columns([2, 1])
-                    with c1: 
-                        admin_clean_opts = [p for p in pay_opts if p != "Select..."]
-                        curr_pay = target_row.get('Payment Method')
-                        new_pay = st.selectbox("Payment Method:", admin_clean_opts, index=admin_clean_opts.index(curr_pay) if curr_pay in admin_clean_opts else 0)
-                    with c2:
-                        st.markdown("<br>", unsafe_allow_html=True) 
-                        if st.button("💾 Update Method", type="primary", width="stretch"):
-                            with st.spinner("Updating DB..."):
-                                if update_single_cell_in_sheet(t_id, target_row['Sheet_Row'], "Payment Method", new_pay):
-                                    log_to_sheet("ADMIN ACTION", f"Changed payment method to '{new_pay}' for {target_name}")
-                                    st.toast("✅ Payment updated successfully!")
-                                    time.sleep(1); st.rerun() 
-                                else: st.error("🚨 Failed to update.")
-                                
-                    st.markdown("**Edit Players:**")
-                    pick_cols_target = [c for c in admin_df.columns if 'pick' in c.lower() and pd.notna(target_row[c])]
-                    current_picks = [str(target_row[c]).split(" (Top 20")[0].strip() for c in pick_cols_target][:5]
-                    current_picks += [""] * (5 - len(current_picks)) 
-                    
-                    p_cols = st.columns(5)
-                    new_ep = []
-                    for i in range(5):
-                        with p_cols[i]:
-                            new_ep.append(st.selectbox(f"Pick {i+1}", [""] + formatted_field_admin, index=get_dropdown_index(current_picks[i], formatted_field_admin), key=f"adm_p{i}"))
-                    
-                    if st.button("💾 Update Picks", type="primary"):
-                        clean_new_picks = [p for p in new_ep if p != ""]
-                        if len(clean_new_picks) != 5: st.error("🚨 Must select exactly 5 players.")
-                        elif len(set(clean_new_picks)) != 5: st.error("🚨 Duplicate players detected!")
-                        elif sum(1 for p in clean_new_picks if "(Top 20" in p) > 2: st.error("🚨 Too many Top 20 players!")
-                        else:
-                            with st.spinner("Writing new picks to Database..."):
-                                success = True
-                                actual_pick_headers = [c for c in admin_df.columns if c.strip().lower().startswith("pick") or "player pick" in c.lower()][:5]
-                                if len(actual_pick_headers) == 5:
-                                    for i in range(5):
-                                        if not update_single_cell_in_sheet(t_id, target_row['Sheet_Row'], actual_pick_headers[i], clean_new_picks[i]): success = False
-                                    if success:
-                                        log_to_sheet("ADMIN ACTION", f"Manually swapped picks for {target_name}")
-                                        st.success("✅ Picks updated successfully!")
-                                        time.sleep(1); st.rerun()
-                                    else: st.error("🚨 Failed to update some picks.")
-                                else: st.error("🚨 Could not identify the exactly 5 pick columns.")
-
-        with t3:
-            st.header("💵 Financial Reconciliation & Payouts")
-            fee = st.number_input("Standard Entry Fee ($)", value=30, step=5)
-            st.divider(); st.subheader("📊 Collection Status by Payment Method")
-            
-            current_fin_df = edited_df if not edited_df.empty else admin_df
-            
-            if not current_fin_df.empty and 'Payment Method' in current_fin_df.columns:
-                df_calc = current_fin_df.copy()
-                df_calc['Fee_Mult'] = df_calc['Payment Method'].apply(lambda x: 0 if str(x).startswith('Other') else fee)
-                df_calc['Is_Paid'] = df_calc['Paid'].apply(lambda x: 1 if str(x).lower() in ['true', 'yes', '1', 'y'] or x is True else 0)
-                
-                df_fin = df_calc.groupby('Payment Method').agg(Total_Entries=('Payment Method', 'size'), Paid_Entries=('Is_Paid', 'sum'), Fee_Per_Entry=('Fee_Mult', 'max')).reset_index()
-                
-                df_fin['Expected ($)'] = df_fin['Total_Entries'] * df_fin['Fee_Per_Entry']
-                df_fin['Collected ($)'] = df_fin['Paid_Entries'] * df_fin['Fee_Per_Entry']
-                df_fin['Outstanding ($)'] = df_fin['Expected ($)'] - df_fin['Collected ($)']
-                
-                display_fin = df_fin[['Payment Method', 'Total_Entries', 'Paid_Entries', 'Expected ($)', 'Collected ($)', 'Outstanding ($)']].rename(columns={'Total_Entries': 'Total Entries', 'Paid_Entries': 'Paid Entries'})
-                st.dataframe(display_fin, width="stretch", hide_index=True)
-                
-                total_expected, total_collected, total_outstanding = display_fin['Expected ($)'].sum(), display_fin['Collected ($)'].sum(), display_fin['Outstanding ($)'].sum()
-                
-                st.markdown("### 🏦 Bank Account Reconciliation (Actuals)")
-                st.caption("Compare your real bank balances against the 'Collected' amounts tracked via the checkboxes above.")
-                
-                z_coll = df_fin[df_fin['Payment Method'].str.contains('Zelle', case=False, na=False)]['Collected ($)'].sum()
-                p_coll = df_fin[df_fin['Payment Method'].str.contains('PayPal', case=False, na=False)]['Collected ($)'].sum()
-                r_coll = df_fin[df_fin['Payment Method'].str.contains('Revolut', case=False, na=False)]['Collected ($)'].sum()
-                
-                saved_bals_str = fetch_fin_balances_from_sheet(t_id)
-                try: saved_bals = json.loads(saved_bals_str)
-                except json.JSONDecodeError: saved_bals = {}
-
-                col_z, col_p, col_r = st.columns(3)
-                with col_z:
-                    st.markdown("**Zelle / Bank**"); st.caption(f"App Collected: **${z_coll}**")
-                    z_actual = st.number_input("Actual Zelle Balance", value=float(saved_bals.get("z_act", 0.0)), step=10.0)
-                    z_personal = st.number_input("Subtract Personal Money", value=float(saved_bals.get("z_per", 0.0)), step=10.0, key="z_pers")
-                    z_net = z_actual - z_personal; z_diff = z_net - z_coll
-                    st.metric("Net Zelle Revenue", f"${z_net:,.2f}", delta=f"-${abs(z_diff):,.2f} vs App" if z_diff < 0 else f"+${z_diff:,.2f} vs App" if z_diff > 0 else "Matches App ✅", delta_color="inverse" if z_diff > 0 else "normal" if z_diff < 0 else "off")
-                with col_p:
-                    st.markdown("**PayPal**"); st.caption(f"App Collected: **${p_coll}**")
-                    p_actual = st.number_input("Actual PayPal Balance", value=float(saved_bals.get("p_act", 0.0)), step=10.0)
-                    p_personal = st.number_input("Subtract Personal Money", value=float(saved_bals.get("p_per", 0.0)), step=10.0, key="p_pers")
-                    p_net = p_actual - p_personal; p_diff = p_net - p_coll
-                    st.metric("Net PayPal Revenue", f"${p_net:,.2f}", delta=f"-${abs(p_diff):,.2f} vs App" if p_diff < 0 else f"+${p_diff:,.2f} vs App" if p_diff > 0 else "Matches App ✅", delta_color="inverse" if p_diff > 0 else "normal" if p_diff < 0 else "off")
-                with col_r:
-                    st.markdown("**Revolut / Cash / Other**"); st.caption(f"App Collected: **${r_coll}**")
-                    r_actual = st.number_input("Actual Revolut/Cash", value=float(saved_bals.get("r_act", 0.0)), step=10.0)
-                    r_personal = st.number_input("Subtract Personal Money", value=float(saved_bals.get("r_per", 0.0)), step=10.0, key="r_pers")
-                    r_net = r_actual - r_personal; r_diff = r_net - r_coll
-                    st.metric("Net Revolut/Cash", f"${r_net:,.2f}", delta=f"-${abs(z_diff):,.2f} vs App" if r_diff < 0 else f"+${r_diff:,.2f} vs App" if r_diff > 0 else "Matches App ✅", delta_color="inverse" if r_diff > 0 else "normal" if r_diff < 0 else "off")
-                
-                total_actual_bank = z_net + p_net + r_net; diff_bank_vs_app = total_actual_bank - total_collected
-                
-                if st.button("💾 Save Bank Balances to DB", type="secondary", width="stretch"):
-                    new_bals = json.dumps({"z_act": z_actual, "z_per": z_personal, "p_act": p_actual, "p_per": p_personal, "r_act": r_actual, "r_per": r_personal})
-                    with st.spinner("Writing balances to DB..."):
-                        if save_fin_balances_to_sheet(t_id, new_bals): 
-                            log_to_sheet("ADMIN ACTION", "Saved Bank Account Reconciliation Balances")
-                            st.success("✅ Balances securely saved! They will permanently survive a refresh.")
-                        else: st.error("🚨 Failed to save balances.")
-
-                st.markdown("---"); st.markdown("### 🧮 Overall Reconciliation")
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Total Expected Pot", f"${total_expected:,.2f}"); c2.metric("Outstanding (Unpaid)", f"${total_outstanding:,.2f}")
-                c3.metric("Total Collected (App)", f"${total_collected:,.2f}")
-                c4.metric("Actual Bank Total", f"${total_actual_bank:,.2f}", delta=f"-${abs(diff_bank_vs_app):,.2f} Bank vs App" if diff_bank_vs_app < 0 else f"+${diff_bank_vs_app:,.2f} Bank vs App" if diff_bank_vs_app > 0 else "Perfect Match ✅", delta_color="inverse" if diff_bank_vs_app > 0 else "normal" if diff_bank_vs_app < 0 else "off")
-                
-                if total_expected > 0:
-                    pct = min(total_collected / total_expected, 1.0)
-                    st.progress(pct, text=f"💰 Collection Progress: ${total_collected:,.2f} / ${total_expected:,.2f} ({pct*100:.1f}%)")
-                    st.markdown("<br>", unsafe_allow_html=True)
-                
-                if diff_bank_vs_app != 0: st.error(f"🚨 **Discrepancy Detected:** Your actual bank balances are off by **${abs(diff_bank_vs_app):,.2f}** compared to the App. Please review payments!")
-                else: st.success("✅ **Reconciled:** Your actual bank balances perfectly match the tracked payments!")
-                
-                st.divider(); st.subheader("🏆 Payout Calculator"); st.caption("Calculations are based on your **Total Expected Pot**.")
-                pct_1, pct_2, pct_3 = st.columns(3)
-                with pct_1: p1_pct = st.number_input("1st Place %", value=60, step=5)
-                with pct_2: p2_pct = st.number_input("2nd Place %", value=30, step=5)
-                with pct_3: p3_pct = st.number_input("3rd Place %", value=10, step=5)
-                
-                st.markdown("**Final Payout Overrides (These are shown to the public):**")
-                fin_1, fin_2, fin_3 = st.columns(3)
-                with fin_1: final_1 = st.number_input("1st Place Amount ($)", value=int((p1_pct / 100) * total_expected), step=5)
-                with fin_2: final_2 = st.number_input("2nd Place Amount ($)", value=int((p2_pct / 100) * total_expected), step=5)
-                with fin_3: final_3 = st.number_input("3rd Place Amount ($)", value=int((p3_pct / 100) * total_expected), step=5)
-                
-                total_pot = final_1 + final_2 + final_3
-                expected_diff = total_expected - total_pot
-                bank_diff = total_actual_bank - total_pot
-                
-                if expected_diff == 0 and bank_diff >= 0:
-                    st.success(f"✅ **Perfect Match!** Total Prize Pot (\\${total_pot:,.2f}) perfectly matches the Expected Revenue, and your Bank has enough to cover it."); allow_save = True
-                elif expected_diff == 0 and bank_diff < 0:
-                    st.warning(f"⚠️ **Pot Matches Expected, but Bank is Short:** Your Prize Pot (\\${total_pot:,.2f}) matches the Total Expected Pot, BUT you are short \\${abs(bank_diff):,.2f} in actual bank collections! You can publish, but chase down those payments."); allow_save = True
-                elif expected_diff > 0:
-                    st.error(f"🚨 **Under Budget:** Your Prize Pot (\\${total_pot:,.2f}) is **\\${expected_diff:,.2f} LESS** than the Total Expected Pot (\\${total_expected:,.2f})."); allow_save = False
-                else:
-                    st.error(f"🚨 **Over Budget:** Your Prize Pot (\\${total_pot:,.2f}) is **\\${abs(expected_diff):,.2f} MORE** than the Total Expected Pot (\\${total_expected:,.2f})."); allow_save = False
-                
-                publish_payouts = st.checkbox("✅ Check here to confirm and reveal Payouts on the Public Tab", value=settings.get(f"payout_confirmed_{t_id}", False), disabled=not allow_save)
-                
-                if st.button("💾 Save Payout Configuration", disabled=not allow_save, type="primary"):
-                    settings[f"payout_1_{t_id}"], settings[f"payout_2_{t_id}"], settings[f"payout_3_{t_id}"], settings[f"payout_pot_{t_id}"], settings[f"payout_confirmed_{t_id}"] = final_1, final_2, final_3, total_pot, publish_payouts
-                    
-                    payout_json = json.dumps({"payout_confirmed": publish_payouts, "p1": final_1, "p2": final_2, "p3": final_3, "pot": total_pot})
-                    with st.spinner("Locking payouts to database..."):
-                        if save_payout_config_to_sheet(t_id, payout_json):
-                            log_to_sheet("ADMIN ACTION", f"Updated Payouts (Total Pot: ${total_pot:,.2f})")
-                            st.success("Payout configurations safely locked and updated!")
-                        else:
-                            st.error("🚨 Failed to save payouts.")
-            else: st.warning("No entries or payment data found yet.")
-
-        with t4: 
-            if "Memory" in data_source: st.info(f"**Data Source:** {data_source}")
-            elif "Live" in data_source: st.success(f"**Data Source:** {data_source}")
-            else: st.warning(f"**Data Source:** {data_source}")
-            
-            admin_pga_tab, pub_pga_tab = st.tabs(["🕵️‍♂️ Admin View (Live Scoring)", "🌍 Public View (Delayed)"])
-            with admin_pga_tab:
-                render_pga_leaderboard(lb_data, full_data, t_id, "admin", par_override=current_par_override, hide_tt=current_hide_tt)
-            with pub_pga_tab:
-                render_pga_leaderboard(lb_data, full_data, t_id, "pub", par_override=current_par_override, hide_tt=current_hide_tt)
-        
-        with t5:
-            st.subheader("💾 Export Data")
-            st.caption("Download the high-level tournament standings (Rank, Name, Total Score, Tie-Breaker).")
-            df_export = calculate_leaderboard(t_id, t_key, t_start, par_override=current_par_override, dns_input=current_dns, valid_players=valid_p, is_admin_download=True, is_admin_view=True)            
-            if df_export is not None and not df_export.empty:
-                export_final = pd.DataFrame()
-                export_final['Rank'] = df_export['DRank']
-                export_final['Player Name'] = df_export['Participant']
-                export_final['Total Score'] = df_export.apply(lambda x: "CUT" if x['Elim'] else x['Total'], axis=1)
-                export_final['Tie Breaker'] = df_export['Tie']
-                st.download_button("⬇️ Download Top-Level Results (CSV)", export_final.to_csv(index=False).encode('utf-8'), f"{html.escape(str(t_key)).replace(' ', '_').split('(')[0]}_Leaderboard.csv", "text/csv")
-            else: st.warning("No data to export.")
-                
-        with t6:
-            st.subheader("📡 API Monitor")
-            cache = get_api_cache()
-            lb_key = f"lb_{t_id}"
-            
-            c1, c2 = st.columns(2)
-            with c1: st.metric("Last Fetch", cache[lb_key]['last_fetch'].strftime("%H:%M:%S") if lb_key in cache else "Never")
-            with c2: st.metric("Next Allowed", cache[lb_key]['next_fetch_allowed'].strftime("%H:%M:%S") if lb_key in cache else "Now")
-            
-            st.info(f"**Current Polling Strategy:** {cache[lb_key].get('mode', 'Unknown') if lb_key in cache else 'Unknown'}")
-            
-            st.divider()
-            st.write("📜 **Session Activity Log**")
-            
-            if st.button("📥 Load Remote Logs"):
-                try:
-                    res = get_supabase().table('app_logs').select('*').eq('tournament_id', str(t_id)).order('created_at', desc=True).limit(50).execute()
-                    if res.data: st.dataframe(pd.DataFrame(res.data), width="stretch", hide_index=True)
-                    else: st.info("Log table is empty.")
-                except Exception as e: st.error(f"Could not load logs: {type(e).__name__} - {e}")
-                    
-        with t7:
-            st.subheader("💻 Raw API JSON")
-            st.caption("Inspect the exact payload returned by the API for this tournament.")
-            if full_data: st.json(full_data)
-            else: st.info("No leaderboard data available from the API yet.")
-            
-        with t8:
-            raw_admin_rules = get_config(t_id, 'rules', DEFAULT_RULES)
-            st.markdown(raw_admin_rules if raw_admin_rules and raw_admin_rules.strip() else DEFAULT_RULES)
-            
-        with t9:
-            st.subheader("🏌️ Tournament Field & Top 20")
-            st.caption("This is the active field returned by the API. It updates automatically.")
-            
-            st.markdown("---")
-            
-            if is_tournament_started:
-                st.info("⛳ The tournament has started! The entry list is locked.")
-                raw_field = [p.split(" (Top 20")[0] for p in formatted_field_admin]
-                
-                if st.button("🛠️ Force Rebuild Frozen Field (Fix Top 20 Flags)", type="primary"):
-                    with st.spinner("Rebuilding Top 20 database..."): 
-                        get_formatted_field(t_id, get_top_20_players())
-                        log_to_sheet("ADMIN ACTION", "Forced rebuild of frozen field and Top 20 flags")
-                    st.success("✅ Database rebuilt and permanently frozen! Please click the 'Clear Cache' button in the sidebar.")
-            else:
-                st.subheader("🚨 Smart Field Alerts")
-                st.caption("Detect if players have been added or removed since your last check.")
-                raw_field = get_raw_entry_list(t_id)
-                
-                baseline_str = fetch_alerted_field_from_sheet(t_id)
-                baseline_field = [p.strip() for p in baseline_str.split(",")] if baseline_str else []
-                
-                if not baseline_str and raw_field:
-                    if st.button("Set Initial Baseline", type="primary"):
-                        save_alerted_field_to_sheet(t_id, ",".join(raw_field))
-                        st.rerun()
-                elif raw_field and baseline_field:
-                    added_players = list(set(raw_field) - set(baseline_field))
-                    removed_players = list(set(baseline_field) - set(raw_field))
-                    
-                    if not added_players and not removed_players: st.success("✅ The field is currently stable. No changes detected.")
-                    else:
-                        if added_players: st.write(f"**➕ Added:** {', '.join(added_players)}")
-                        if removed_players: st.write(f"**❌ Removed:** {', '.join(removed_players)}")
-                        
-                        if st.button("🚀 Send Alert Emails", type="primary"):
-                            with st.spinner("Sending emails..."):
-                                try: current_close_dt = datetime.datetime.strptime(settings.get(f"close_time_{t_id}"), "%Y-%m-%d %H:%M:%S") if settings.get(f"close_time_{t_id}") else datetime.datetime.now(datetime.timezone.utc)
-                                except (ValueError, TypeError): current_close_dt = datetime.datetime.now(datetime.timezone.utc)
-                                
-                                try:
-                                    uk_tz = pytz.timezone('Europe/London'); et_tz = pytz.timezone('America/New_York')
-                                    ct_uk = uk_tz.localize(current_close_dt); ct_et = ct_uk.astimezone(et_tz)
-                                    close_time_str_admin = f"{ct_uk.strftime('%a, %b %d at %I:%M %p')} UK / {ct_et.strftime('%a, %b %d at %I:%M %p')} ET"
-                                except Exception: close_time_str_admin = current_close_dt.strftime('%a, %b %d at %I:%M %p')
-                                
-                                emails_sent = 0
-                                alerted_emails = set()
-                                
-                                if not admin_df.empty:
-                                    name_col = next((c for c in admin_df.columns if c not in ['Sheet_Row', 'Email', 'Payment Method', 'Paid', 'Field Status', '_Original_Name'] and 'pick' not in c.lower()), admin_df.columns[2])
-                                    for _, row in admin_df.iterrows():
-                                        user_email = str(row.get('Email', '')).strip().lower()
-                                        user_name = str(row.get('_Original_Name', row.get(name_col, 'Entrant')))
-                                        if not user_email or '@' not in user_email: continue
-                                        if user_email in alerted_emails: continue 
-                                        
-                                        user_picks = [str(row[c]).split(" (Top 20")[0].strip() for c in admin_df.columns if 'pick' in c.lower() and pd.notna(row[c])]
-                                        affected_removals = [p for p in removed_players if p in user_picks]
-                                        
-                                        if affected_removals or added_players:
-                                            if send_field_change_email(user_email, user_name, affected_removals, added_players, t_key.split('(')[0], t_id, close_time_str_admin, admin_logo):
-                                                emails_sent += 1
-                                                alerted_emails.add(user_email)
-                                                time.sleep(1.5)
-                                                
-                                save_alerted_field_to_sheet(t_id, ",".join(raw_field))
-                                st.success(f"✅ Sent {emails_sent} alerts!"); st.rerun()
-
-            st.markdown("---")
-            if formatted_field_admin:
-                display_df = pd.DataFrame([{"Player": p.split(" (Top 20")[0], "Top 20 Restriction?": "✅ Yes" if "(Top 20" in p else ""} for p in formatted_field_admin])
-                st.dataframe(display_df, width="stretch", hide_index=True)
-            else: 
-                st.info("Field has not been populated by the API yet.")
-        
-        with t10:
-            st.subheader("📈 Live Traffic Analytics")
-            st.caption("Live visitor tracking powered by Umami.")
-            umami_share_url = "https://cloud.umami.is/share/eSEE741Q3wuxQygs"
-            st.html(f'<iframe src="{umami_share_url}" width="100%" height="800px" style="border:none;" scrolling="yes"></iframe>')
-
-        with t11:
-            st.subheader("🔀 Name Alias Manager")
-            st.caption("Link a player's drafted name to their official API leaderboard name to fix 'Not in Field' errors.")
-            
-            current_aliases = fetch_aliases_from_sheet(t_id)
-            alias_list = [a.strip() for a in current_aliases.split(",") if a.strip()]
-            
-            st.markdown("### Current Aliases")
-            if alias_list:
-                for idx, a in enumerate(alias_list):
-                    if ':' in a:
-                        w, c = a.split(':')
-                        colA, colB = st.columns([4, 1])
-                        with colA: st.markdown(f"**{html.escape(w.strip().title())}** ➡️ mapped to API name **{html.escape(c.strip().title())}**")
-                        with colB:
-                            if st.button("❌ Remove", key=f"rm_alias_{idx}"):
-                                alias_list.pop(idx)
-                                save_aliases_to_sheet(t_id, ",".join(alias_list))
-                                st.rerun()
-            else:
-                st.info("No aliases currently set.")
-                
-            st.markdown("---")
-            st.markdown("### Add New Alias")
-            c_wrong, c_right = st.columns(2)
-            with c_wrong: new_wrong = st.text_input("Drafted Name (e.g. Nico Echavarria)", key="new_w")
-            with c_right: new_right = st.text_input("API Name (e.g. Nicolas Echavarria)", key="new_r")
-            
-            if st.button("➕ Add Alias", type="primary"):
-                if new_wrong and new_right:
-                    new_pair = f"{new_wrong.strip()}:{new_right.strip()}"
-                    alias_list.append(new_pair)
-                    with st.spinner("Saving to DB..."):
-                        if save_aliases_to_sheet(t_id, ",".join(alias_list)):
-                            st.success("Alias added successfully!")
-                            st.rerun()
-                        else: st.error("🚨 Failed to save alias.")
-                else:
-                    st.error("🚨 Please fill out both names.")
+                        <div style="font-size: 0.95em;">🇬🇧 UK Time: <b>{preview_uk.strftime('%I:%M %p')}</b> on {preview_uk.strftime('%b %
