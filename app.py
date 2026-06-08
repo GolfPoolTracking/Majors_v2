@@ -2362,8 +2362,14 @@ else:
         admin_logo = fetch_logo_from_sheet(t_id)
         t_name_display = t_key.split('(')[0].strip() if t_key else "Tournament"
         
-        # 💥 Updates the browser tab for the Admin view
-        st.html(f"""<script>document.title = "{t_name_display.replace('"', '')} Admin";</script>""")
+        # 💥 Updates the browser tab for the Admin view (Safari-proof)
+        st.html(f"""
+        <script>
+            setTimeout(function() {{
+                window.parent.document.title = "{t_name_display.replace('"', '')} Admin";
+            }}, 100);
+        </script>
+        """)
         
         logo_rendered = False
         
