@@ -1382,16 +1382,20 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
                     r_str = str(row.get('DRank', '-'))
                     if r_str == '-': continue
                     if r_str not in grouped_ranks: grouped_ranks[r_str] = []
-                    grouped_ranks[r_str].append(html.escape(str(row['Participant'])))
+                    grouped_ranks[r_str].append({
+                        "name": html.escape(str(row['Participant'])),
+                        "score": format_score(row['Total']),
+                        "tie": row['Tie']
+                    })
                 
-                for r_str, names in grouped_ranks.items():
+                for r_str, players in grouped_ranks.items():
                     match = re.search(r'\d+', r_str)
                     if not match: continue
                     base_r = int(match.group())
                     
                     if current_prizes_used >= 3: break 
                         
-                    n_players = len(names)
+                    n_players = len(players)
                     prizes_to_take = min(n_players, 3 - current_prizes_used)
                     
                     total_cash = 0
@@ -1401,8 +1405,14 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
                         
                     payout = total_cash / n_players if n_players > 0 else 0
                     
-                    for name in names:
-                        podium_players.append({"name": name, "rank": base_r, "payout": payout})
+                    for p_data in players:
+                        podium_players.append({
+                            "name": p_data['name'], 
+                            "rank": base_r, 
+                            "payout": payout,
+                            "score": p_data['score'],
+                            "tie": p_data['tie']
+                        })
                 
                 r1_players = [p for p in podium_players if p['rank'] == 1]
                 r2_players = [p for p in podium_players if p['rank'] == 2]
@@ -1424,7 +1434,9 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
                         cash_str = f"{p['payout']:,.2f}".replace(".00", "") 
                         pz_str = f"<br><span style='color:#27ae60; font-size:1.1em;'><b>${cash_str}</b></span>"
                         
-                    block = f"<div style='flex: 1; max-width: {s['mw']}; background: {s['bg']}; border-radius: 8px 8px 0 0; padding: {s['padding']}; margin: 0 4px; border: 1px solid {s['border']}; border-bottom: none; position: relative; z-index: {s['z']}; {s['shadow']}'><div style='font-size: {s['sz']}; margin-bottom: 5px;'>{s['medal']}</div><div style='font-size: 0.9em; font-weight: bold; color: #475569; word-wrap: break-word;'>{p['name']}</div>{pz_str}</div>"
+                    score_str = f"<div style='font-size: 0.9em; margin-top: 4px;'><b style='color: #2ecc71;'>{p['score']}</b> <span style='color: #475569; opacity: 0.8;'>({p['tie']})</span></div>"
+                        
+                    block = f"<div style='flex: 1; max-width: {s['mw']}; background: {s['bg']}; border-radius: 8px 8px 0 0; padding: {s['padding']}; margin: 0 4px; border: 1px solid {s['border']}; border-bottom: none; position: relative; z-index: {s['z']}; {s['shadow']}'><div style='font-size: {s['sz']}; margin-bottom: 5px;'>{s['medal']}</div><div style='font-size: 0.9em; font-weight: bold; color: #475569; word-wrap: break-word;'>{p['name']}</div>{score_str}{pz_str}</div>"
                     html_blocks.append(block)
                 
                 final_html = "<div style='display: flex; justify-content: center; align-items: flex-end; margin: 20px 0 0px 0; text-align: center; font-family: sans-serif;'>" + "".join(html_blocks) + "</div><div style='height: 4px; background-color: #2c3e50; margin-bottom: 30px; border-radius: 2px;'></div>"
