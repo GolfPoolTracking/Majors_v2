@@ -1632,7 +1632,7 @@ if is_public:
     
     st.html(f"""
     <script>
-        document.title = '{tnm.replace('"', '')} Sweepstakes';
+        document.title = "{tnm.replace('"', '')} Sweepstakes";
         if (!document.querySelector('meta[name="apple-mobile-web-app-capable"]')) {{
             const meta1 = document.createElement('meta'); meta1.name = "apple-mobile-web-app-capable"; meta1.content = "yes"; document.head.appendChild(meta1);
             const meta2 = document.createElement('meta'); meta2.name = "apple-mobile-web-app-status-bar-style"; meta2.content = "black-translucent"; document.head.appendChild(meta2);
@@ -2361,6 +2361,10 @@ else:
     if t_id:
         admin_logo = fetch_logo_from_sheet(t_id)
         t_name_display = t_key.split('(')[0].strip() if t_key else "Tournament"
+        
+        # 💥 Updates the browser tab for the Admin view
+        st.html(f"""<script>document.title = "{t_name_display.replace('"', '')} Admin";</script>""")
+        
         logo_rendered = False
         
         if admin_logo:
