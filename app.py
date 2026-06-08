@@ -49,7 +49,7 @@ else:
         st.error("🚨 Configuration Error: `admin_password` is missing from Streamlit Secrets.")
         st.stop()
 
-BASE_URL = "https://majors-test.streamlit.app/"
+BASE_URL = "https://golfmajors-v2.streamlit.app/"
 DEFAULT_RULES = """### 🏆 Tournament Rules\n\n⛳ **The Team:** Pick **5** players, max **2** from Top 20.\n\n🏌️‍♂️ **Scoring:** The **best 4 scores** each day count.\n\n✂️ **The Cut:** If **2 or more** picks miss the cut, team is out.\n\n⚖️ **Tie Break:** Predict Winner's total score to par.\n\n⏳ **Deadline:** Midnight before the tournament.\n\n💰 **Entry Fee:** **$30**."""
 
 @st.cache_resource
