@@ -838,14 +838,19 @@ def fetch_smart_leaderboard(selected_t_id):
             players_in_target = [p for p in lb_data if safe_int(p.get('current_round', 0)) == target_r and p.get('status', '').lower() not in ['cut', 'wd', 'dq', 'withdrawn', 'missed cut']]
             all_target_complete = len(players_in_target) > 0 and all(p.get('status', '').lower() in ['complete', 'completed'] for p in players_in_target)
             
+            prev_min_tt_str = "23:59"
             min_tt_str, max_tt_str = "23:59", "00:00"
+            
             for p in lb_data:
                 for r in p.get('rounds', []):
-                    if safe_int(r.get('round_number', 0)) == target_r:
-                        tt = r.get('tee_time_local', '')
-                        if tt and ':' in tt:
+                    r_num = safe_int(r.get('round_number', 0))
+                    tt = r.get('tee_time_local', '')
+                    if tt and ':' in tt:
+                        if r_num == target_r:
                             if tt < min_tt_str: min_tt_str = tt
                             if tt > max_tt_str: max_tt_str = tt
+                        elif r_num == target_r - 1:
+                            if tt < prev_min_tt_str: prev_min_tt_str = tt
                             
             has_tee_times = (max_tt_str != "00:00" and min_tt_str != "23:59")
             
@@ -860,10 +865,29 @@ def fetch_smart_leaderboard(selected_t_id):
                 next_fetch = now + datetime.timedelta(minutes=10)
                 mode = f"⏳ API Lag: Waiting for R{target_r + 1} Rollover (10m)"
             elif not has_tee_times:
-                # 🚨 FAIL-SAFE 2: No tee times yet
+                # 🚨 FAIL-SAFE 2: No tee times yet, but it's the weekend
                 if current_r >= 3 and t_status == 'inprogress':
-                    next_fetch = now + datetime.timedelta(minutes=10)
-                    mode = f"⏳ API Lag: Awaiting R{target_r} Times (10m)"
+                    start_polling_dt = None
+                    if prev_min_tt_str != "23:59":
+                        parts = prev_min_tt_str.split(':')
+                        # Construct target time using the previous round's hour/minute
+                        start_polling_dt = now_tourney.replace(hour=int(parts[0]), minute=int(parts[1]), second=0, microsecond=0)
+                        
+                        # If that time is in the past, and it's > 6 hours ago, we are likely on the night before.
+                        # Add a day so it sleeps until tomorrow morning.
+                        if start_polling_dt < now_tourney:
+                            if (now_tourney - start_polling_dt).total_seconds() > 21600: 
+                                start_polling_dt += datetime.timedelta(days=1)
+                                
+                    if start_polling_dt and now_tourney < start_polling_dt:
+                        # Sleep until the previous round's start time
+                        wait_sec = (start_polling_dt - now_tourney).total_seconds()
+                        next_fetch = now + datetime.timedelta(seconds=max(60, wait_sec))
+                        mode = f"😴 Sleep until R{target_r-1} start time ({prev_min_tt_str})"
+                    else:
+                        # We have crossed the threshold, aggressively poll for tee times
+                        next_fetch = now + datetime.timedelta(minutes=10)
+                        mode = f"⏳ API Lag: Awaiting R{target_r} Times (10m)"
                 else:
                     next_fetch = now + datetime.timedelta(minutes=240)
                     mode = "😴 Waiting for Tee Times (4h)"
