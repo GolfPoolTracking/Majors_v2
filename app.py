@@ -852,8 +852,13 @@ def fetch_smart_leaderboard(selected_t_id):
                 next_fetch = now + datetime.timedelta(minutes=60)
                 mode = f"⏸️ {t_status.title()} (1h)"
             elif not has_tee_times:
-                next_fetch = now + datetime.timedelta(minutes=240)
-                mode = "😴 Waiting for Tee Times (4h)"
+                # 🚨 FAIL-SAFE: API is lagging on weekend tee times
+                if current_r >= 3 and t_status == 'inprogress':
+                    next_fetch = now + datetime.timedelta(minutes=10)
+                    mode = f"⏳ API Lag: Awaiting R{target_r} Times (10m)"
+                else:
+                    next_fetch = now + datetime.timedelta(minutes=240)
+                    mode = "😴 Waiting for Tee Times (4h)"
             else:
                 min_tt_parts = min_tt_str.split(':')
                 max_tt_parts = max_tt_str.split(':')
