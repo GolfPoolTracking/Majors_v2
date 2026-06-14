@@ -833,8 +833,12 @@ def fetch_smart_leaderboard(selected_t_id):
             now_tourney = now_utc.astimezone(tourney_tz)
             
             target_r = current_r if current_r > 0 else 1
-            min_tt_str, max_tt_str = "23:59", "00:00"
             
+            # Check if all players in target round are done, but API hasn't rolled status to endofday
+            players_in_target = [p for p in lb_data if safe_int(p.get('current_round', 0)) == target_r and p.get('status', '').lower() not in ['cut', 'wd', 'dq', 'withdrawn', 'missed cut']]
+            all_target_complete = len(players_in_target) > 0 and all(p.get('status', '').lower() in ['complete', 'completed'] for p in players_in_target)
+            
+            min_tt_str, max_tt_str = "23:59", "00:00"
             for p in lb_data:
                 for r in p.get('rounds', []):
                     if safe_int(r.get('round_number', 0)) == target_r:
@@ -851,8 +855,12 @@ def fetch_smart_leaderboard(selected_t_id):
             elif t_status in ['suspended', 'endofday']:
                 next_fetch = now + datetime.timedelta(minutes=60)
                 mode = f"⏸️ {t_status.title()} (1h)"
+            elif all_target_complete and t_status == 'inprogress':
+                # 🚨 FAIL-SAFE 1: Round is done but API hasn't rolled over to next round yet
+                next_fetch = now + datetime.timedelta(minutes=10)
+                mode = f"⏳ API Lag: Waiting for R{target_r + 1} Rollover (10m)"
             elif not has_tee_times:
-                # 🚨 FAIL-SAFE: API is lagging on weekend tee times
+                # 🚨 FAIL-SAFE 2: No tee times yet
                 if current_r >= 3 and t_status == 'inprogress':
                     next_fetch = now + datetime.timedelta(minutes=10)
                     mode = f"⏳ API Lag: Awaiting R{target_r} Times (10m)"
@@ -871,33 +879,19 @@ def fetch_smart_leaderboard(selected_t_id):
                     last_tt_dt += datetime.timedelta(days=1)
 
                 first_check_dt = first_tt_dt + datetime.timedelta(minutes=30)
+                live_scoring_start_dt = last_tt_dt + datetime.timedelta(minutes=10)
                 
-                if target_r < 4: 
-                    target_finish = last_tt_dt + datetime.timedelta(hours=4, minutes=30)
-                    if now_tourney < first_check_dt:
-                        wait_sec = (first_check_dt - now_tourney).total_seconds()
-                        next_fetch = now + datetime.timedelta(seconds=max(60, wait_sec))
-                        mode = f"⏳ Wait for R{target_r} Start (+30m after 1st TT)"
-                    elif now_tourney < target_finish:
-                        wait_sec = (target_finish - now_tourney).total_seconds()
-                        next_fetch = now + datetime.timedelta(seconds=max(60, wait_sec))
-                        mode = f"⏳ Sleep till R{target_r} Finish (+4.5h after last TT)"
-                    else:
-                        next_fetch = now + datetime.timedelta(minutes=60)
-                        mode = f"⛳ R{target_r} Wrap-up (1h)"
-                else: 
-                    r4_live_dt = last_tt_dt + datetime.timedelta(minutes=10)
-                    if now_tourney < first_check_dt:
-                        wait_sec = (first_check_dt - now_tourney).total_seconds()
-                        next_fetch = now + datetime.timedelta(seconds=max(60, wait_sec))
-                        mode = f"⏳ Wait for R4 Start (+30m after 1st TT)"
-                    elif now_tourney < r4_live_dt:
-                        wait_sec = (r4_live_dt - now_tourney).total_seconds()
-                        next_fetch = now + datetime.timedelta(seconds=max(60, wait_sec))
-                        mode = f"⏳ Wait for R4 Last TT (+10m)"
-                    else:
-                        next_fetch = now + datetime.timedelta(minutes=5)
-                        mode = "🔥 R4 Live Scoring (5m)"
+                if now_tourney < first_check_dt:
+                    wait_sec = (first_check_dt - now_tourney).total_seconds()
+                    next_fetch = now + datetime.timedelta(seconds=max(60, wait_sec))
+                    mode = f"⏳ Wait for R{target_r} Start (+30m after 1st TT)"
+                elif now_tourney < live_scoring_start_dt:
+                    wait_sec = (live_scoring_start_dt - now_tourney).total_seconds()
+                    next_fetch = now + datetime.timedelta(seconds=max(60, wait_sec))
+                    mode = f"⏳ Wait for R{target_r} Last TT (+10m)"
+                else:
+                    next_fetch = now + datetime.timedelta(minutes=5)
+                    mode = f"🔥 R{target_r} Live Scoring (5m)"
 
         except Exception as e:
             log_to_sheet("TZ/TT ERROR", str(e))
