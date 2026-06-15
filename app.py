@@ -1801,7 +1801,8 @@ if is_public:
             st.info(f"🔒 **Tournament Picks are Hidden**\n\nThe public leaderboard and all player entries will be revealed on **{reveal_time_str_ui}**.")
             
             if close_time:
-                close_ts = int(close_time.replace(tzinfo=datetime.timezone.utc).timestamp() * 1000)
+                uk_tz = pytz.timezone('Europe/London')
+                close_ts = int(uk_tz.localize(close_time).timestamp() * 1000)
                 timer_html = f"""
                 <!DOCTYPE html>
                 <html>
