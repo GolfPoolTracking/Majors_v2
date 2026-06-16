@@ -2031,7 +2031,7 @@ if is_public:
                             with st.container():
                                 st.markdown("---")
                                 name_col_val = next((c for c in user_df.columns if c not in ['Sheet_Row', 'Email', 'Payment Method', 'Paid', 'Tie', 'Picks', 'Field Status', 'SheetWarnings', 'Tie Breaker'] and 'pick' not in c.lower()), user_df.columns[2])
-                                p_list = [str(r[c]) for c in user_df.columns if 'pick' in str(c).lower() and pd.notna(r[c]) and str(r[c]).strip() != ""]
+                                p_list = [str(r[c]) for c in ['Pick 1', 'Pick 2', 'Pick 3', 'Pick 4', 'Pick 5'] if c in user_df.columns and pd.notna(r[c]) and str(r[c]).strip() != ""]
                                 tie_val = int(safe_int(r.get('Tie Breaker', r.get('Tie', 0))))
                                 c1, c2 = st.columns([3, 1])
                                 with c1:
@@ -2083,7 +2083,7 @@ if is_public:
             st.caption("See who the crowd is backing! This data is generated from all locked-in teams.")
             
             if total_count > 0 and not full_df.empty:
-                pick_cols = [c for c in full_df.columns if 'pick' in c.lower()]
+                pick_cols = [c for c in ['Pick 1', 'Pick 2', 'Pick 3', 'Pick 4', 'Pick 5'] if c in full_df.columns]
                 all_picks = []
                 for c in pick_cols:
                     all_picks.extend(full_df[c].dropna().astype(str).tolist())
@@ -2490,7 +2490,7 @@ else:
                                 else: st.error("🚨 Failed to update.")
                                 
                     st.markdown("**Edit Players:**")
-                    pick_cols_target = [c for c in admin_df.columns if 'pick' in c.lower() and pd.notna(target_row[c])]
+                    pick_cols_target = [c for c in ['Pick 1', 'Pick 2', 'Pick 3', 'Pick 4', 'Pick 5'] if c in admin_df.columns and pd.notna(target_row[c])]
                     current_picks = [str(target_row[c]).split(" (Top 20")[0].strip() for c in pick_cols_target][:5]
                     current_picks += [""] * (5 - len(current_picks)) 
                     
@@ -2508,7 +2508,7 @@ else:
                         else:
                             with st.spinner("Writing new picks to Database..."):
                                 success = True
-                                actual_pick_headers = [c for c in admin_df.columns if c.strip().lower().startswith("pick") or "player pick" in c.lower()][:5]
+                                actual_pick_headers = ['Pick 1', 'Pick 2', 'Pick 3', 'Pick 4', 'Pick 5']
                                 if len(actual_pick_headers) == 5:
                                     for i in range(5):
                                         if not update_single_cell_in_sheet(t_id, target_row['Sheet_Row'], actual_pick_headers[i], clean_new_picks[i]): success = False
@@ -2747,7 +2747,7 @@ else:
                                         if not user_email or '@' not in user_email: continue
                                         if user_email in alerted_emails: continue 
                                         
-                                        user_picks = [str(row[c]).split(" (Top 20")[0].strip() for c in admin_df.columns if 'pick' in c.lower() and pd.notna(row[c])]
+                                        user_picks = [str(row[c]).split(" (Top 20")[0].strip() for c in ['Pick 1', 'Pick 2', 'Pick 3', 'Pick 4', 'Pick 5'] if c in admin_df.columns and pd.notna(row[c])]
                                         affected_removals = [p for p in removed_players if p in user_picks]
                                         
                                         if affected_removals or added_players:
