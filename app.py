@@ -903,19 +903,37 @@ def fetch_smart_leaderboard(selected_t_id):
                     last_tt_dt += datetime.timedelta(days=1)
 
                 first_check_dt = first_tt_dt + datetime.timedelta(minutes=30)
-                live_scoring_start_dt = last_tt_dt + datetime.timedelta(minutes=10)
                 
-                if now_tourney < first_check_dt:
-                    wait_sec = (first_check_dt - now_tourney).total_seconds()
-                    next_fetch = now + datetime.timedelta(seconds=max(60, wait_sec))
-                    mode = f"⏳ Wait for R{target_r} Start (+30m after 1st TT)"
-                elif now_tourney < live_scoring_start_dt:
-                    wait_sec = (live_scoring_start_dt - now_tourney).total_seconds()
-                    next_fetch = now + datetime.timedelta(seconds=max(60, wait_sec))
-                    mode = f"⏳ Wait for R{target_r} Last TT (+10m)"
+                if target_r < 4:
+                    # 🚨 R1-3 LOGIC: Sleep until 4.5 hours after the LAST tee time
+                    end_of_play_dt = last_tt_dt + datetime.timedelta(hours=4, minutes=30)
+                    
+                    if now_tourney < first_check_dt:
+                        wait_sec = (first_check_dt - now_tourney).total_seconds()
+                        next_fetch = now + datetime.timedelta(seconds=max(60, wait_sec))
+                        mode = f"⏳ Wait for R{target_r} Start (+30m after 1st TT)"
+                    elif now_tourney < end_of_play_dt:
+                        wait_sec = (end_of_play_dt - now_tourney).total_seconds()
+                        next_fetch = now + datetime.timedelta(seconds=max(60, wait_sec))
+                        mode = f"😴 Awaiting R{target_r} Finish (4.5h after last TT)"
+                    else:
+                        next_fetch = now + datetime.timedelta(minutes=30)
+                        mode = f"⏳ Checking for R{target_r} Completion (30m)"
                 else:
-                    next_fetch = now + datetime.timedelta(minutes=5)
-                    mode = f"🔥 R{target_r} Live Scoring (5m)"
+                    # 🚨 R4 LOGIC: Live Scoring (10 min after last tee time -> 5m loops)
+                    live_scoring_start_dt = last_tt_dt + datetime.timedelta(minutes=10)
+                    
+                    if now_tourney < first_check_dt:
+                        wait_sec = (first_check_dt - now_tourney).total_seconds()
+                        next_fetch = now + datetime.timedelta(seconds=max(60, wait_sec))
+                        mode = f"⏳ Wait for R{target_r} Start (+30m after 1st TT)"
+                    elif now_tourney < live_scoring_start_dt:
+                        wait_sec = (live_scoring_start_dt - now_tourney).total_seconds()
+                        next_fetch = now + datetime.timedelta(seconds=max(60, wait_sec))
+                        mode = f"⏳ Wait for R{target_r} Last TT (+10m)"
+                    else:
+                        next_fetch = now + datetime.timedelta(minutes=5)
+                        mode = f"🔥 R{target_r} Live Scoring (5m)"
 
         except Exception as e:
             log_to_sheet("TZ/TT ERROR", str(e))
@@ -1706,9 +1724,12 @@ if is_public:
         if reveal_time:
             reveal_time_str_ui = reveal_time.strftime('%a, %b %d at %I:%M %p')
             
-    now = datetime.datetime.now()
-    is_accepting_entries = close_time and now < close_time 
-    is_pre_reveal = reveal_time and now < reveal_time
+    now_utc = datetime.datetime.now(pytz.utc)
+    now_uk = now_utc.astimezone(pytz.timezone('Europe/London'))
+    now_naive = now_uk.replace(tzinfo=None)
+    
+    is_accepting_entries = close_time and now_naive < close_time 
+    is_pre_reveal = reveal_time and now_naive < reveal_time
     show_real = True 
     
     raw_rules = get_config(tid, 'rules', DEFAULT_RULES)
@@ -2075,7 +2096,8 @@ if is_public:
             st.markdown("### 📝 Full Entry List")
             st.metric("🎟️ Total Entries", total_count)
             if not full_df.empty: 
-                st.dataframe(full_df.drop(columns=['Sheet_Row', 'Email', 'Payment Method', 'Paid', '_Original_Name'], errors='ignore'), width="stretch", hide_index=True)
+                cols_to_drop = ['Sheet_Row', 'Email', 'Payment Method', 'Paid', '_Original_Name', 'tournament_id', 'picks', 'id', 'created_at']
+                st.dataframe(full_df.drop(columns=cols_to_drop, errors='ignore'), width="stretch", hide_index=True)
         current_tab += 1
         
         with sel[current_tab]:
