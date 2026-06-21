@@ -23,27 +23,16 @@ if st.query_params.get("view") == "ping":
 # 🚨 DYNAMIC THEME CSS (FOR DARK MODE SUPPORT) 🚨
 st.markdown("""
 <style>
-    .compact-container { background-color: var(--secondary-background-color);
- color: var(--text-color); border: 1px solid rgba(130, 130, 130, 0.4); border-radius: 6px; padding: 10px; margin-bottom: 15px;
- }
-    details { border: 1px solid rgba(130, 130, 130, 0.4) !important; border-radius: 8px !important; background-color: var(--background-color) !important;
- margin-bottom: 8px !important; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-    summary { background-color: var(--background-color) !important;
- color: var(--text-color) !important; display: flex !important; align-items: center; padding: 10px 12px !important; cursor: pointer; list-style: none !important; overflow-x: auto !important;
- -webkit-overflow-scrolling: touch; scrollbar-width: none; -ms-overflow-style: none; }
-    summary::-webkit-scrollbar { display: none;
- }
-    summary::before { content: '▶'; font-size: 0.8em; margin-right: 12px; color: var(--text-color); opacity: 0.6; transition: transform 0.2s ease-in-out;
- flex-shrink: 0; }
-    details[open] > summary::before { transform: rotate(90deg);
- }
-    summary > div { display: inline-grid !important; vertical-align: middle; margin-left: 2px;
- }
-    .expanded-content { padding: 10px; background-color: var(--secondary-background-color) !important; border-top: 1px solid rgba(130, 130, 130, 0.4) !important;
- }
+    .compact-container { background-color: var(--secondary-background-color); color: var(--text-color); border: 1px solid rgba(130, 130, 130, 0.4); border-radius: 6px; padding: 10px; margin-bottom: 15px; }
+    details { border: 1px solid rgba(130, 130, 130, 0.4) !important; border-radius: 8px !important; background-color: var(--background-color) !important; margin-bottom: 8px !important; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+    summary { background-color: var(--background-color) !important; color: var(--text-color) !important; display: flex !important; align-items: center; padding: 10px 12px !important; cursor: pointer; list-style: none !important; overflow-x: auto !important; -webkit-overflow-scrolling: touch; scrollbar-width: none; -ms-overflow-style: none; }
+    summary::-webkit-scrollbar { display: none; }
+    summary::before { content: '▶'; font-size: 0.8em; margin-right: 12px; color: var(--text-color); opacity: 0.6; transition: transform 0.2s ease-in-out; flex-shrink: 0; }
+    details[open] > summary::before { transform: rotate(90deg); }
+    summary > div { display: inline-grid !important; vertical-align: middle; margin-left: 2px; }
+    .expanded-content { padding: 10px; background-color: var(--secondary-background-color) !important; border-top: 1px solid rgba(130, 130, 130, 0.4) !important; }
     table { color: var(--text-color); }
-    small { color: var(--text-color); opacity: 0.7;
- }
+    small { color: var(--text-color); opacity: 0.7; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -511,7 +500,6 @@ def send_confirmation_email(user_email, name, picks, tie_breaker, payment, t_nam
           <body style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #2c3e50; line-height: 1.6; max-width: 600px; margin: 0 auto; padding: 20px;">
             {logo_html}
             <p style="font-size: 16px;">Hi <b>{html.escape(name)}</b>,</p>
-            
             <p style="font-size: 16px;">Your entry has been securely <b>{status_word.lower()}</b>! Here are your official team picks for the tournament:</p>
             
             <div style="background-color: #f8f9fa; border-left: 4px solid #2ecc71; padding: 15px 20px; border-radius: 4px; margin: 20px 0;">
@@ -995,12 +983,10 @@ def render_roster_table(picks, p_info_lower, rounds_active, counting_map, is_liv
         if p_key not in p_info_lower:
             rows.append(f"<tr><td style='padding-bottom: 5px;'>⚠️ {safe_p}</td><td colspan='{len(rounds_active)+1}' style='color:red;'>Not in Field</td></tr>")
             continue
-        d = p_info_lower[p_key]
-        stt = d['status']
+        d = p_info_lower[p_key]; stt = d['status']
         row_html = f"<tr><td style='padding-right:15px; min-width:140px; padding-bottom: 5px;'>{safe_p}</td>"
         for r in rounds_active:
-            s = d['rounds'].get(r, None)
-            is_cnt = p_key in counting_map.get(r, [])
+            s = d['rounds'].get(r, None); is_cnt = p_key in counting_map.get(r, [])
             if s is None and stt in ['cut', 'wd', 'dq']: val = f"<span style='color:#e74c3c;'>{stt.upper()}</span>"
             elif s is None: val = "<span style='color:#7f8c8d;'>-</span>"
             else: 
@@ -1009,7 +995,7 @@ def render_roster_table(picks, p_info_lower, rounds_active, counting_map, is_liv
                     hp = d.get('holes_played', 0)
                     if 0 < hp < 18:
                         txt = f"{txt} <small>({hp})</small>"
-                    
+                        
                 if s < 0: 
                     score_color = "#e74c3c"
                     bg_color = "rgba(231, 76, 60, 0.15)"
@@ -1079,13 +1065,11 @@ def get_clean_entries(t_id, public_mode, valid_players=[], dns_players=[], email
         df = df.drop(columns=['_name_lower', '_entry_num', '_total_entries'])
 
         if valid_players or dns_players:
-            stt = []
-            v_low = [p.strip().lower() for p in valid_players]; d_low = [p.strip().lower() for p in dns_players]
+            stt = []; v_low = [p.strip().lower() for p in valid_players]; d_low = [p.strip().lower() for p in dns_players]
             pick_cols = ['Pick 1', 'Pick 2', 'Pick 3', 'Pick 4', 'Pick 5']
 
             for _, row in df.iterrows():
-                inv = []
-                wrn = []
+                inv = []; wrn = []
                 for col in pick_cols:
                     if col in df.columns:
                         p = str(row[col]).split(" (Top 20")[0].strip()
@@ -1093,7 +1077,6 @@ def get_clean_entries(t_id, public_mode, valid_players=[], dns_players=[], email
                             l = p.lower()
                             if l in d_low: wrn.append(p)
                             elif l not in v_low: inv.append(p)
-    
                 msgs = []
                 if inv: msgs.append(f"❌ {', '.join(inv)} not in field")
                 if wrn: msgs.append(f"⚠️ {', '.join(wrn)} DNS")
@@ -1141,6 +1124,8 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
         elif active_field and all(safe_int(p.get('holes_played', 0)) == 18 for p in active_field):
             is_round_finished_consensus = True
         elif t_status == 'inprogress' and not active_field and not not_started_current:
+            is_round_finished_consensus = True
+        elif t_status == 'inprogress' and total_holes_live == 0:
             is_round_finished_consensus = True
         else:
             is_round_finished_consensus = False
@@ -1372,11 +1357,9 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
                     p_scores.append((p_key, score))
                 
                 p_scores.sort(key=lambda x: int(x[1]))
-                top_4 = p_scores[:4];
-                c_map[r] = [x[0] for x in top_4]
+                top_4 = p_scores[:4]; c_map[r] = [x[0] for x in top_4]
                 r_sum = sum(int(x[1]) for x in top_4)
-                r_sc[r] = r_sum;
-                running += r_sum; cum_sc[r] = running; total += r_sum
+                r_sc[r] = r_sum; running += r_sum; cum_sc[r] = running; total += r_sum
                 
             cut_made = (current_r > 2) or (current_r == 2 and is_round_finished_consensus)
             elim = (cut_made and sum(1 for p in picks if p.lower() in p_info_lower and p_info_lower[p.lower()]['status'] not in ['cut','wd','dq']) < 4)
@@ -1395,14 +1378,12 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
             df['DRank'] = "-"
         else:
             df = df.sort_values(by=["Elim", "Total", "Diff", "Participant"], ascending=[True, True, True, True]).reset_index(drop=True)
-            dr = [];
-            cr = 1
+            dr = []; cr = 1
             for i in range(len(df)):
                 if i > 0 and df.iloc[i]['Elim'] == df.iloc[i-1]['Elim'] and df.iloc[i]['Total'] == df.iloc[i-1]['Total'] and df.iloc[i]['Diff'] == df.iloc[i-1]['Diff']:
                     dr.append(f"T{cr}")
                     if not str(dr[i-1]).startswith("T"): dr[i-1] = f"T{cr}"
-                else: cr = i + 1;
-                dr.append(str(cr))
+                else: cr = i + 1; dr.append(str(cr))
             df['DRank'] = dr
 
         history_ranks = {idx: {} for idx in df.index}
@@ -1415,16 +1396,14 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
                     r_str = f"T{rank_start}"
                     prev_idx = sorted_indices[k-1]
                     if not history_ranks[prev_idx].get(r, "").startswith("T"): history_ranks[prev_idx][r] = f"T{rank_start}"
-                else: rank_start = k + 1;
-                r_str = str(rank_start)
+                else: rank_start = k + 1; r_str = str(rank_start)
                 history_ranks[idx][r] = r_str
 
         if is_admin_download: return df 
         
         if t_status == 'completed' and not is_admin_view and not header_only:
             if not st.session_state.get(f"balloons_{t_id}"):
-                st.balloons();
-                st.session_state[f"balloons_{t_id}"] = True
+                st.balloons(); st.session_state[f"balloons_{t_id}"] = True
                 
             settings_cache = get_settings_cache()
             conf = settings_cache.get(f"payout_confirmed_{t_id}", False)
@@ -1456,7 +1435,7 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
                     base_r = int(match.group())
                     
                     if current_prizes_used >= 3: break 
-                    
+                        
                     n_players = len(players)
                     prizes_to_take = min(n_players, 3 - current_prizes_used)
                     
@@ -1630,8 +1609,7 @@ def render_pga_leaderboard(lb_data, full_data, tourney_id, view_mode, par_overri
     if not is_live_scoring_active:
         real_df['Sort_Status'] = real_df['Status'].apply(lambda x: 1 if x in ['withdrawn', 'missed cut', 'disqualified', 'wd', 'cut', 'dq'] else 0)
         real_df = real_df.sort_values(by=['Sort_Status', 'Total', 'Player']).reset_index(drop=True)
-        ranks = [];
-        crank = 1
+        ranks = []; crank = 1
         for i in range(len(real_df)):
             score, status = real_df.loc[i, 'Total'], real_df.loc[i, 'Status']
             if status in ['withdrawn', 'wd']: ranks.append("WD")
@@ -1640,10 +1618,8 @@ def render_pga_leaderboard(lb_data, full_data, tourney_id, view_mode, par_overri
             elif score == 999: ranks.append("-")
             else:
                 if i > 0 and real_df.loc[i, 'Total'] == real_df.loc[i-1, 'Total'] and real_df.loc[i, 'Sort_Status'] == 0:
-                    ranks.append(f"T{crank}");
-                    ranks[i-1] = f"T{crank}" if not str(ranks[i-1]).startswith("T") else ranks[i-1]
-                else: crank = i + 1;
-                ranks.append(str(crank))
+                    ranks.append(f"T{crank}"); ranks[i-1] = f"T{crank}" if not str(ranks[i-1]).startswith("T") else ranks[i-1]
+                else: crank = i + 1; ranks.append(str(crank))
         real_df['Pos'] = ranks
     
     real_df = real_df.drop(columns=['Status', 'Sort_Status'], errors='ignore')
@@ -1663,8 +1639,7 @@ settings = get_settings_cache()
 if is_public:
     tid = target_tourney_id
     if not tid and "tournaments" in st.secrets: tid = next(iter(st.secrets["tournaments"]), None)
-    if not tid: st.error("No tournament ID.");
-    st.stop()
+    if not tid: st.error("No tournament ID."); st.stop()
     st.session_state['current_t_id'] = tid
     
     current_par_override = fetch_par_from_sheet(tid)
@@ -1694,8 +1669,7 @@ if is_public:
     cache = get_api_cache()
     lb_key = f"lb_{tid}"
     is_live_now = (lb_key in cache and "R4 Live Scoring" in cache[lb_key].get("mode", ""))
-    refresh_script = """setInterval(function(){ window.location.reload();
-    }, 300000);""" if is_live_now else ""
+    refresh_script = """setInterval(function(){ window.location.reload(); }, 300000);""" if is_live_now else ""
     
     st.html(f"""
     <script>
@@ -1709,7 +1683,7 @@ if is_public:
             const script = document.createElement('script');
             script.id = 'umami-tracker';
             script.defer = true;
-            script.dataset.websiteId = "6b529d5f-180e-452a-b6bf-ca2a0525186b";
+            script.dataset.websiteId = "6b529d5f-180e-452a-b6bf-ca2a0525186b"; 
             script.src = "https://cloud.umami.is/script.js"; 
             document.head.appendChild(script);
         }}
@@ -1941,8 +1915,7 @@ if is_public:
                     submitted = st.form_submit_button("Submit Team", type="primary")
                     
                     if submitted:
-                        picks = [p1, p2, p3, p4, p5];
-                        clean_picks = [p for p in picks if p != ""]
+                        picks = [p1, p2, p3, p4, p5]; clean_picks = [p for p in picks if p != ""]
                         has_error = True 
                         
                         if not form_name or not form_email: st.error("🚨 Name and Email are required.")
@@ -2005,8 +1978,7 @@ if is_public:
                     with c_submit: update_submitted = st.form_submit_button("Update Team", type="primary")
                     
                     if update_submitted:
-                        new_picks = [ep1, ep2, ep3, ep4, ep5];
-                        clean_picks = [p for p in new_picks if p != ""]
+                        new_picks = [ep1, ep2, ep3, ep4, ep5]; clean_picks = [p for p in new_picks if p != ""]
                         has_error = True 
                         
                         if not edit_name: st.error("🚨 Name is required.")
@@ -2041,8 +2013,7 @@ if is_public:
                                     st.error("🚨 Could not update entry.")
                                     st.session_state[f"last_upd_{tid}"] = None
                                     
-                if st.button("Cancel Edit"): st.session_state["editing_row"] = None;
-                st.rerun()
+                if st.button("Cancel Edit"): st.session_state["editing_row"] = None; st.rerun()
             else:
                 email_input = ""
                 if st.session_state.get(f"edit_success_{tid}"):
@@ -2088,7 +2059,7 @@ if is_public:
                                     safe_team_name = html.escape(str(r[name_col_val]))
                                     safe_picks = html.escape(', '.join(p_list))
                                     if is_authenticated:
-                                        st.markdown(f"**Team Name:** {safe_team_name}  | **Tie Breaker:** `{tie_val}`\n\n**Picks:** {safe_picks}")
+                                        st.markdown(f"**Team Name:** {safe_team_name}  |  **Tie Breaker:** `{tie_val}`\n\n**Picks:** {safe_picks}")
                                         if not str(r.get("Field Status", "✅ All Valid")).startswith("✅"): st.error(f"🚨 Roster Issue: {r.get('Field Status')}")
                                     else:
                                         st.markdown(f"**Team Name:** {safe_team_name}\n\n🔒 *Picks and Tie Breaker are hidden. Click the button above to send a secure link to your email to view or edit this entry.*")
@@ -2221,8 +2192,7 @@ else:
                 st.rerun()
         
         ak = [k for k in st.secrets.keys() if "api" in k.lower() and "key" in k.lower()]
-        if not ak: st.error("No API keys found in secrets!");
-        st.stop()
+        if not ak: st.error("No API keys found in secrets!"); st.stop()
             
         active = st.selectbox("API Key", ak, index=ak.index(settings.get("active_api_key", ak[0])) if settings.get("active_api_key") in ak else 0)
         st.caption(f"📊 **Quota:** {settings.get(f'quota_{active}', 'Checking (Will update on next API pull)...')}")
@@ -2289,7 +2259,7 @@ else:
                     st.rerun()
                 else:
                     st.error("🚨 Failed to save logo.")
-                
+                    
             if new_logo: st.image(new_logo, width="stretch")
             
             st.subheader("🚑 Smart DNS Manager")
@@ -2303,8 +2273,7 @@ else:
                     dns_list = [p for p in dns_list if p.lower() != action_name[1:].strip().lower()]
                     st.success(f"Removed {action_name[1:]}")
                 else:
-                    if not any(p.lower() == action_name.lower() for p in dns_list): dns_list.append(action_name);
-                    st.success(f"Added {action_name}")
+                    if not any(p.lower() == action_name.lower() for p in dns_list): dns_list.append(action_name); st.success(f"Added {action_name}")
                 if save_dns_to_sheet(t_id, ", ".join(dns_list)): st.rerun()
                 else: st.error("Failed to save.")
             settings[f"dns_{t_id}"] = current_dns
@@ -2433,8 +2402,7 @@ else:
                         else: 
                             st.error("Failed to generate link.")
                             
-            if st.button("🔄 Clear Cache"): get_api_cache().clear();
-            st.cache_data.clear(); get_raw_sheet_data.clear(); st.rerun()
+            if st.button("🔄 Clear Cache"): get_api_cache().clear(); st.cache_data.clear(); get_raw_sheet_data.clear(); st.rerun()
 
     if t_id:
         admin_logo = fetch_logo_from_sheet(t_id)
@@ -2540,8 +2508,7 @@ else:
                                 if update_single_cell_in_sheet(t_id, target_row['Sheet_Row'], "Payment Method", new_pay):
                                     log_to_sheet("ADMIN ACTION", f"Changed payment method to '{new_pay}' for {target_name}")
                                     st.toast("✅ Payment updated successfully!")
-                                    time.sleep(1);
-                                    st.rerun() 
+                                    time.sleep(1); st.rerun() 
                                 else: st.error("🚨 Failed to update.")
                                 
                     st.markdown("**Edit Players:**")
@@ -2570,16 +2537,14 @@ else:
                                     if success:
                                         log_to_sheet("ADMIN ACTION", f"Manually swapped picks for {target_name}")
                                         st.success("✅ Picks updated successfully!")
-                                        time.sleep(1);
-                                        st.rerun()
+                                        time.sleep(1); st.rerun()
                                     else: st.error("🚨 Failed to update some picks.")
                                 else: st.error("🚨 Could not identify the exactly 5 pick columns.")
 
         with t3:
             st.header("💵 Financial Reconciliation & Payouts")
             fee = st.number_input("Standard Entry Fee ($)", value=30, step=5)
-            st.divider();
-            st.subheader("📊 Collection Status by Payment Method")
+            st.divider(); st.subheader("📊 Collection Status by Payment Method")
             
             current_fin_df = edited_df if not edited_df.empty else admin_df
             
@@ -2589,7 +2554,7 @@ else:
                 df_calc['Is_Paid'] = df_calc['Paid'].apply(lambda x: 1 if str(x).lower() in ['true', 'yes', '1', 'y'] or x is True else 0)
                 
                 df_fin = df_calc.groupby('Payment Method').agg(Total_Entries=('Payment Method', 'size'), Paid_Entries=('Is_Paid', 'sum'), Fee_Per_Entry=('Fee_Mult', 'max')).reset_index()
-
+                
                 df_fin['Expected ($)'] = df_fin['Total_Entries'] * df_fin['Fee_Per_Entry']
                 df_fin['Collected ($)'] = df_fin['Paid_Entries'] * df_fin['Fee_Per_Entry']
                 df_fin['Outstanding ($)'] = df_fin['Expected ($)'] - df_fin['Collected ($)']
@@ -2612,31 +2577,25 @@ else:
 
                 col_z, col_p, col_r = st.columns(3)
                 with col_z:
-                    st.markdown("**Zelle / Bank**");
-                    st.caption(f"App Collected: **${z_coll}**")
+                    st.markdown("**Zelle / Bank**"); st.caption(f"App Collected: **${z_coll}**")
                     z_actual = st.number_input("Actual Zelle Balance", value=float(saved_bals.get("z_act", 0.0)), step=10.0)
                     z_personal = st.number_input("Subtract Personal Money", value=float(saved_bals.get("z_per", 0.0)), step=10.0, key="z_pers")
-                    z_net = z_actual - z_personal;
-                    z_diff = z_net - z_coll
+                    z_net = z_actual - z_personal; z_diff = z_net - z_coll
                     st.metric("Net Zelle Revenue", f"${z_net:,.2f}", delta=f"-${abs(z_diff):,.2f} vs App" if z_diff < 0 else f"+${z_diff:,.2f} vs App" if z_diff > 0 else "Matches App ✅", delta_color="inverse" if z_diff > 0 else "normal" if z_diff < 0 else "off")
                 with col_p:
-                    st.markdown("**PayPal**");
-                    st.caption(f"App Collected: **${p_coll}**")
+                    st.markdown("**PayPal**"); st.caption(f"App Collected: **${p_coll}**")
                     p_actual = st.number_input("Actual PayPal Balance", value=float(saved_bals.get("p_act", 0.0)), step=10.0)
                     p_personal = st.number_input("Subtract Personal Money", value=float(saved_bals.get("p_per", 0.0)), step=10.0, key="p_pers")
-                    p_net = p_actual - p_personal;
-                    p_diff = p_net - p_coll
+                    p_net = p_actual - p_personal; p_diff = p_net - p_coll
                     st.metric("Net PayPal Revenue", f"${p_net:,.2f}", delta=f"-${abs(p_diff):,.2f} vs App" if p_diff < 0 else f"+${p_diff:,.2f} vs App" if p_diff > 0 else "Matches App ✅", delta_color="inverse" if p_diff > 0 else "normal" if p_diff < 0 else "off")
                 with col_r:
                     st.markdown("**Revolut / Cash / Other**"); st.caption(f"App Collected: **${r_coll}**")
                     r_actual = st.number_input("Actual Revolut/Cash", value=float(saved_bals.get("r_act", 0.0)), step=10.0)
                     r_personal = st.number_input("Subtract Personal Money", value=float(saved_bals.get("r_per", 0.0)), step=10.0, key="r_pers")
-                    r_net = r_actual - r_personal;
-                    r_diff = r_net - r_coll
+                    r_net = r_actual - r_personal; r_diff = r_net - r_coll
                     st.metric("Net Revolut/Cash", f"${r_net:,.2f}", delta=f"-${abs(r_diff):,.2f} vs App" if r_diff < 0 else f"+${r_diff:,.2f} vs App" if r_diff > 0 else "Matches App ✅", delta_color="inverse" if r_diff > 0 else "normal" if r_diff < 0 else "off")
                 
-                total_actual_bank = z_net + p_net + r_net;
-                diff_bank_vs_app = total_actual_bank - total_collected
+                total_actual_bank = z_net + p_net + r_net; diff_bank_vs_app = total_actual_bank - total_collected
                 
                 if st.button("💾 Save Bank Balances to DB", type="secondary", width="stretch"):
                     new_bals = json.dumps({"z_act": z_actual, "z_per": z_personal, "p_act": p_actual, "p_per": p_personal, "r_act": r_actual, "r_per": r_personal})
@@ -2646,11 +2605,9 @@ else:
                             st.success("✅ Balances securely saved! They will permanently survive a refresh.")
                         else: st.error("🚨 Failed to save balances.")
 
-                st.markdown("---");
-                st.markdown("### 🧮 Overall Reconciliation")
+                st.markdown("---"); st.markdown("### 🧮 Overall Reconciliation")
                 c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Total Expected Pot", f"${total_expected:,.2f}");
-                c2.metric("Outstanding (Unpaid)", f"${total_outstanding:,.2f}")
+                c1.metric("Total Expected Pot", f"${total_expected:,.2f}"); c2.metric("Outstanding (Unpaid)", f"${total_outstanding:,.2f}")
                 c3.metric("Total Collected (App)", f"${total_collected:,.2f}")
                 c4.metric("Actual Bank Total", f"${total_actual_bank:,.2f}", delta=f"-${abs(diff_bank_vs_app):,.2f} Bank vs App" if diff_bank_vs_app < 0 else f"+${diff_bank_vs_app:,.2f} Bank vs App" if diff_bank_vs_app > 0 else "Perfect Match ✅", delta_color="inverse" if diff_bank_vs_app > 0 else "normal" if diff_bank_vs_app < 0 else "off")
                 
@@ -2662,8 +2619,7 @@ else:
                 if diff_bank_vs_app != 0: st.error(f"🚨 **Discrepancy Detected:** Your actual bank balances are off by **${abs(diff_bank_vs_app):,.2f}** compared to the App. Please review payments!")
                 else: st.success("✅ **Reconciled:** Your actual bank balances perfectly match the tracked payments!")
                 
-                st.divider();
-                st.subheader("🏆 Payout Calculator"); st.caption("Calculations are based on your **Total Expected Pot**.")
+                st.divider(); st.subheader("🏆 Payout Calculator"); st.caption("Calculations are based on your **Total Expected Pot**.")
                 pct_1, pct_2, pct_3 = st.columns(3)
                 with pct_1: p1_pct = st.number_input("1st Place %", value=60, step=5)
                 with pct_2: p2_pct = st.number_input("2nd Place %", value=30, step=5)
@@ -2682,14 +2638,11 @@ else:
                 if expected_diff == 0 and bank_diff >= 0:
                     st.success(f"✅ **Perfect Match!** Total Prize Pot (\\${total_pot:,.2f}) perfectly matches the Expected Revenue, and your Bank has enough to cover it."); allow_save = True
                 elif expected_diff == 0 and bank_diff < 0:
-                    st.warning(f"⚠️ **Pot Matches Expected, but Bank is Short:** Your Prize Pot (\\${total_pot:,.2f}) matches the Total Expected Pot, BUT you are short \\${abs(bank_diff):,.2f} in actual bank collections! You can publish, but chase down those payments.");
-                    allow_save = True
+                    st.warning(f"⚠️ **Pot Matches Expected, but Bank is Short:** Your Prize Pot (\\${total_pot:,.2f}) matches the Total Expected Pot, BUT you are short \\${abs(bank_diff):,.2f} in actual bank collections! You can publish, but chase down those payments."); allow_save = True
                 elif expected_diff > 0:
-                    st.error(f"🚨 **Under Budget:** Your Prize Pot (\\${total_pot:,.2f}) is **\\${expected_diff:,.2f} LESS** than the Total Expected Pot (\\${total_expected:,.2f}).");
-                    allow_save = False
+                    st.error(f"🚨 **Under Budget:** Your Prize Pot (\\${total_pot:,.2f}) is **\\${expected_diff:,.2f} LESS** than the Total Expected Pot (\\${total_expected:,.2f})."); allow_save = False
                 else:
-                    st.error(f"🚨 **Over Budget:** Your Prize Pot (\\${total_pot:,.2f}) is **\\${abs(expected_diff):,.2f} MORE** than the Total Expected Pot (\\${total_expected:,.2f}).");
-                    allow_save = False
+                    st.error(f"🚨 **Over Budget:** Your Prize Pot (\\${total_pot:,.2f}) is **\\${abs(expected_diff):,.2f} MORE** than the Total Expected Pot (\\${total_expected:,.2f})."); allow_save = False
                 
                 publish_payouts = st.checkbox("✅ Check here to confirm and reveal Payouts on the Public Tab", value=settings.get(f"payout_confirmed_{t_id}", False), disabled=not allow_save)
                 
@@ -2795,7 +2748,7 @@ else:
                     else:
                         if added_players: st.write(f"**➕ Added:** {', '.join(added_players)}")
                         if removed_players: st.write(f"**❌ Removed:** {', '.join(removed_players)}")
-                    
+                        
                         if st.button("🚀 Send Alert Emails", type="primary"):
                             with st.spinner("Sending emails..."):
                                 current_close_dt = datetime.datetime.strptime(settings.get(f"close_time_{t_id}"), "%Y-%m-%d %H:%M:%S") if settings.get(f"close_time_{t_id}") else datetime.datetime.now()
