@@ -1231,10 +1231,11 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
             for vp in (valid_players or []):
                 if vp.lower() not in p_info_lower: p_info_lower[vp.lower()] = {'status': 'active', 'rounds': {}, 'total': 0, 'holes_played': 0}
         
+        # 🚨 THE FIX: Calculate the winning score based strictly on the LIVE leaderboard
         win_score = 0
-        if sweep_max_round > 0:
-            active_scores = [v['total'] for v in p_info_lower.values() if v['status'] in ['active', 'complete', 'completed', 'cut', 'endofday', 'notstarted', 'not started'] and v['total'] != 999]
-            if active_scores: win_score = min(active_scores)
+        live_win_scores = [safe_int(p.get('total_to_par', 0)) for p in lb_data if str(p.get('status', '')).lower() not in ['withdrawn', 'wd', 'disqualified', 'dq']]
+        if live_win_scores: 
+            win_score = min(live_win_scores)
             
         if t_status not in ['completed', 'endofday', 'pre', '']:
             if is_round_finished_consensus: t_status = 'completed' if current_r == 4 else 'endofday'
