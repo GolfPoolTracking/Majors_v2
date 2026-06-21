@@ -984,10 +984,12 @@ def render_roster_table(picks, p_info_lower, rounds_active, counting_map, is_liv
         if p_key not in p_info_lower:
             rows.append(f"<tr><td style='padding-bottom: 5px;'>⚠️ {safe_p}</td><td colspan='{len(rounds_active)+1}' style='color:red;'>Not in Field</td></tr>")
             continue
-        d = p_info_lower[p_key]; stt = d['status']
+        d = p_info_lower[p_key]
+        stt = d['status']
         row_html = f"<tr><td style='padding-right:15px; min-width:140px; padding-bottom: 5px;'>{safe_p}</td>"
         for r in rounds_active:
-            s = d['rounds'].get(r, None); is_cnt = p_key in counting_map.get(r, [])
+            s = d['rounds'].get(r, None)
+            is_cnt = p_key in counting_map.get(r, [])
             if s is None and stt in ['cut', 'wd', 'dq']: val = f"<span style='color:#e74c3c;'>{stt.upper()}</span>"
             elif s is None: val = "<span style='color:#7f8c8d;'>-</span>"
             else: 
@@ -996,7 +998,7 @@ def render_roster_table(picks, p_info_lower, rounds_active, counting_map, is_liv
                     hp = d.get('holes_played', 0)
                     if 0 < hp < 18:
                         txt = f"{txt} <small>({hp})</small>"
-                        
+                    
                 if s < 0: 
                     score_color = "#e74c3c"
                     bg_color = "rgba(231, 76, 60, 0.15)"
@@ -1066,11 +1068,13 @@ def get_clean_entries(t_id, public_mode, valid_players=[], dns_players=[], email
         df = df.drop(columns=['_name_lower', '_entry_num', '_total_entries'])
 
         if valid_players or dns_players:
-            stt = []; v_low = [p.strip().lower() for p in valid_players]; d_low = [p.strip().lower() for p in dns_players]
+            stt = []
+            v_low = [p.strip().lower() for p in valid_players]; d_low = [p.strip().lower() for p in dns_players]
             pick_cols = ['Pick 1', 'Pick 2', 'Pick 3', 'Pick 4', 'Pick 5']
 
             for _, row in df.iterrows():
-                inv = []; wrn = []
+                inv = []
+                wrn = []
                 for col in pick_cols:
                     if col in df.columns:
                         p = str(row[col]).split(" (Top 20")[0].strip()
@@ -1078,6 +1082,7 @@ def get_clean_entries(t_id, public_mode, valid_players=[], dns_players=[], email
                             l = p.lower()
                             if l in d_low: wrn.append(p)
                             elif l not in v_low: inv.append(p)
+    
                 msgs = []
                 if inv: msgs.append(f"❌ {', '.join(inv)} not in field")
                 if wrn: msgs.append(f"⚠️ {', '.join(wrn)} DNS")
@@ -1230,34 +1235,10 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
             for vp in (valid_players or []):
                 if vp.lower() not in p_info_lower: p_info_lower[vp.lower()] = {'status': 'active', 'rounds': {}, 'total': 0, 'holes_played': 0}
         
-        # 🚨 FIX: ALWAYS FETCH TRUE LIVE LEADER SCORE FOR TIE-BREAKER 🚨
         win_score = 0
-        if lb_data:
-            live_active_scores = []
-            for p in lb_data:
-                name_lower = f"{p.get('first_name','')} {p.get('last_name','')}".strip().lower()
-                stt = str(p.get('status', '')).lower()
-                norm_stt = status_map.get(stt, stt)
-                final_stt = 'wd' if name_lower in dns_list else norm_stt
-                
-                if final_stt not in ['cut', 'missed cut', 'wd', 'withdrawn', 'dq', 'disqualified', 'pre', '']:
-                    api_tot = safe_int(p.get('total_to_par', 0))
-                    if par_override > 0:
-                        unclamped_rds = {}
-                        try: strokes = [safe_int(rd.get('strokes', 0)) for rd in p.get('rounds', [])]
-                        except Exception: strokes = [0]*4
-                        for i, rd in enumerate(p.get('rounds', [])):
-                            r_num = rd.get('round_number')
-                            if not r_num: continue
-                            s = strokes[i]
-                            if s > 0: unclamped_rds[r_num] = (s - par_override) if (s > 40) else safe_int(rd.get('total_to_par', 0))
-                        
-                        api_past_tot = get_corrected_past_total(p, current_r, par_override)
-                        live_total = sum([unclamped_rds.get(x, 0) for x in range(1, current_r)]) + (api_tot - api_past_tot)
-                        live_active_scores.append(live_total)
-                    else:
-                        live_active_scores.append(api_tot)
-            if live_active_scores: win_score = min(live_active_scores)
+        if sweep_max_round > 0:
+            active_scores = [v['total'] for v in p_info_lower.values() if v['status'] in ['active', 'complete', 'completed', 'cut', 'endofday', 'notstarted', 'not started'] and v['total'] != 999]
+            if active_scores: win_score = min(active_scores)
             
         if t_status not in ['completed', 'endofday', 'pre', '']:
             if is_round_finished_consensus: t_status = 'completed' if current_r == 4 else 'endofday'
@@ -2771,10 +2752,88 @@ else:
                     else:
                         if added_players: st.write(f"**➕ Added:** {', '.join(added_players)}")
                         if removed_players: st.write(f"**❌ Removed:** {', '.join(removed_players)}")
-                        
+                    
                         if st.button("🚀 Send Alert Emails", type="primary"):
                             with st.spinner("Sending emails..."):
                                 current_close_dt = datetime.datetime.strptime(settings.get(f"close_time_{t_id}"), "%Y-%m-%d %H:%M:%S") if settings.get(f"close_time_{t_id}") else datetime.datetime.now()
                                 try:
                                     uk_tz = pytz.timezone('Europe/London'); et_tz = pytz.timezone('America/New_York')
-                                    ct_uk = uk_tz.localize(current_close_dt); ct_et = ct_I encountered an error doing what you asked. Could you try again?
+                                    ct_uk = uk_tz.localize(current_close_dt); ct_et = ct_uk.astimezone(et_tz)
+                                    close_time_str_admin = f"{ct_uk.strftime('%a, %b %d at %I:%M %p')} UK / {ct_et.strftime('%a, %b %d at %I:%M %p')} ET"
+                                except Exception: close_time_str_admin = current_close_dt.strftime('%a, %b %d at %I:%M %p')
+                                
+                                emails_sent = 0
+                                alerted_emails = set()
+                                
+                                if not admin_df.empty:
+                                    name_col = next((c for c in admin_df.columns if c not in ['Sheet_Row', 'Email', 'Payment Method', 'Paid', 'Field Status', '_Original_Name'] and 'pick' not in c.lower()), admin_df.columns[2])
+                                    for _, row in admin_df.iterrows():
+                                        user_email = str(row.get('Email', '')).strip().lower()
+                                        user_name = str(row.get('_Original_Name', row.get(name_col, 'Entrant')))
+                                        if not user_email or '@' not in user_email: continue
+                                        if user_email in alerted_emails: continue 
+                                        
+                                        user_picks = [str(row[c]).split(" (Top 20")[0].strip() for c in ['Pick 1', 'Pick 2', 'Pick 3', 'Pick 4', 'Pick 5'] if c in admin_df.columns and pd.notna(row[c])]
+                                        affected_removals = [p for p in removed_players if p in user_picks]
+                                        
+                                        if affected_removals or added_players:
+                                            if send_field_change_email(user_email, user_name, affected_removals, added_players, t_key.split('(')[0], t_id, close_time_str_admin, admin_logo):
+                                                emails_sent += 1
+                                                alerted_emails.add(user_email)
+                                                time.sleep(1.5)
+                                                
+                                save_alerted_field_to_sheet(t_id, ",".join(raw_field))
+                                st.success(f"✅ Sent {emails_sent} alerts!"); st.rerun()
+
+            st.markdown("---")
+            if formatted_field_admin:
+                display_df = pd.DataFrame([{"Player": p.split(" (Top 20")[0], "Top 20 Restriction?": "✅ Yes" if "(Top 20" in p else ""} for p in formatted_field_admin])
+                st.dataframe(display_df, width="stretch", hide_index=True)
+            else: 
+                st.info("Field has not been populated by the API yet.")
+        
+        with t10:
+            st.subheader("📈 Live Traffic Analytics")
+            st.caption("Live visitor tracking powered by Umami.")
+            umami_share_url = "https://cloud.umami.is/share/eSEE741Q3wuxQygs"
+            st.html(f'<iframe src="{umami_share_url}" width="100%" height="800px" style="border:none;" scrolling="yes"></iframe>')
+
+        with t11:
+            st.subheader("🔀 Name Alias Manager")
+            st.caption("Link a player's drafted name to their official API leaderboard name to fix 'Not in Field' errors.")
+            
+            current_aliases = fetch_aliases_from_sheet(t_id)
+            alias_list = [a.strip() for a in current_aliases.split(",") if a.strip()]
+            
+            st.markdown("### Current Aliases")
+            if alias_list:
+                for idx, a in enumerate(alias_list):
+                    if ':' in a:
+                        w, c = a.split(':')
+                        colA, colB = st.columns([4, 1])
+                        with colA: st.markdown(f"**{w.strip().title()}** ➡️ mapped to API name **{c.strip().title()}**")
+                        with colB:
+                            if st.button("❌ Remove", key=f"rm_alias_{idx}"):
+                                alias_list.pop(idx)
+                                save_aliases_to_sheet(t_id, ",".join(alias_list))
+                                st.rerun()
+            else:
+                st.info("No aliases currently set.")
+                
+            st.markdown("---")
+            st.markdown("### Add New Alias")
+            c_wrong, c_right = st.columns(2)
+            with c_wrong: new_wrong = st.text_input("Drafted Name (e.g. Nico Echavarria)", key="new_w")
+            with c_right: new_right = st.text_input("API Name (e.g. Nicolas Echavarria)", key="new_r")
+            
+            if st.button("➕ Add Alias", type="primary"):
+                if new_wrong and new_right:
+                    new_pair = f"{new_wrong.strip()}:{new_right.strip()}"
+                    alias_list.append(new_pair)
+                    with st.spinner("Saving to DB..."):
+                        if save_aliases_to_sheet(t_id, ",".join(alias_list)):
+                            st.success("Alias added successfully!")
+                            st.rerun()
+                        else: st.error("🚨 Failed to save alias.")
+                else:
+                    st.error("🚨 Please fill out both names.")
