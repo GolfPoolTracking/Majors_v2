@@ -500,6 +500,7 @@ def send_confirmation_email(user_email, name, picks, tie_breaker, payment, t_nam
           <body style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #2c3e50; line-height: 1.6; max-width: 600px; margin: 0 auto; padding: 20px;">
             {logo_html}
             <p style="font-size: 16px;">Hi <b>{html.escape(name)}</b>,</p>
+            
             <p style="font-size: 16px;">Your entry has been securely <b>{status_word.lower()}</b>! Here are your official team picks for the tournament:</p>
             
             <div style="background-color: #f8f9fa; border-left: 4px solid #2ecc71; padding: 15px 20px; border-radius: 4px; margin: 20px 0;">
@@ -983,10 +984,12 @@ def render_roster_table(picks, p_info_lower, rounds_active, counting_map, is_liv
         if p_key not in p_info_lower:
             rows.append(f"<tr><td style='padding-bottom: 5px;'>⚠️ {safe_p}</td><td colspan='{len(rounds_active)+1}' style='color:red;'>Not in Field</td></tr>")
             continue
-        d = p_info_lower[p_key]; stt = d['status']
+        d = p_info_lower[p_key]
+        stt = d['status']
         row_html = f"<tr><td style='padding-right:15px; min-width:140px; padding-bottom: 5px;'>{safe_p}</td>"
         for r in rounds_active:
-            s = d['rounds'].get(r, None); is_cnt = p_key in counting_map.get(r, [])
+            s = d['rounds'].get(r, None)
+            is_cnt = p_key in counting_map.get(r, [])
             if s is None and stt in ['cut', 'wd', 'dq']: val = f"<span style='color:#e74c3c;'>{stt.upper()}</span>"
             elif s is None: val = "<span style='color:#7f8c8d;'>-</span>"
             else: 
@@ -995,7 +998,7 @@ def render_roster_table(picks, p_info_lower, rounds_active, counting_map, is_liv
                     hp = d.get('holes_played', 0)
                     if 0 < hp < 18:
                         txt = f"{txt} <small>({hp})</small>"
-                        
+                    
                 if s < 0: 
                     score_color = "#e74c3c"
                     bg_color = "rgba(231, 76, 60, 0.15)"
@@ -1065,11 +1068,13 @@ def get_clean_entries(t_id, public_mode, valid_players=[], dns_players=[], email
         df = df.drop(columns=['_name_lower', '_entry_num', '_total_entries'])
 
         if valid_players or dns_players:
-            stt = []; v_low = [p.strip().lower() for p in valid_players]; d_low = [p.strip().lower() for p in dns_players]
+            stt = []
+            v_low = [p.strip().lower() for p in valid_players]; d_low = [p.strip().lower() for p in dns_players]
             pick_cols = ['Pick 1', 'Pick 2', 'Pick 3', 'Pick 4', 'Pick 5']
 
             for _, row in df.iterrows():
-                inv = []; wrn = []
+                inv = []
+                wrn = []
                 for col in pick_cols:
                     if col in df.columns:
                         p = str(row[col]).split(" (Top 20")[0].strip()
@@ -1077,6 +1082,7 @@ def get_clean_entries(t_id, public_mode, valid_players=[], dns_players=[], email
                             l = p.lower()
                             if l in d_low: wrn.append(p)
                             elif l not in v_low: inv.append(p)
+    
                 msgs = []
                 if inv: msgs.append(f"❌ {', '.join(inv)} not in field")
                 if wrn: msgs.append(f"⚠️ {', '.join(wrn)} DNS")
@@ -1124,8 +1130,6 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
         elif active_field and all(safe_int(p.get('holes_played', 0)) == 18 for p in active_field):
             is_round_finished_consensus = True
         elif t_status == 'inprogress' and not active_field and not not_started_current:
-            is_round_finished_consensus = True
-        elif t_status == 'inprogress' and total_holes_live == 0:
             is_round_finished_consensus = True
         else:
             is_round_finished_consensus = False
@@ -1435,7 +1439,7 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
                     base_r = int(match.group())
                     
                     if current_prizes_used >= 3: break 
-                        
+                    
                     n_players = len(players)
                     prizes_to_take = min(n_players, 3 - current_prizes_used)
                     
@@ -1683,7 +1687,7 @@ if is_public:
             const script = document.createElement('script');
             script.id = 'umami-tracker';
             script.defer = true;
-            script.dataset.websiteId = "6b529d5f-180e-452a-b6bf-ca2a0525186b"; 
+            script.dataset.websiteId = "6b529d5f-180e-452a-b6bf-ca2a0525186b";
             script.src = "https://cloud.umami.is/script.js"; 
             document.head.appendChild(script);
         }}
@@ -1860,7 +1864,7 @@ if is_public:
                             setTimeout(tick, 1000);
                         }}
                         tick();
-                    </script>
+                        </script>
                 </body>
                 </html>
                 """
@@ -2554,7 +2558,7 @@ else:
                 df_calc['Is_Paid'] = df_calc['Paid'].apply(lambda x: 1 if str(x).lower() in ['true', 'yes', '1', 'y'] or x is True else 0)
                 
                 df_fin = df_calc.groupby('Payment Method').agg(Total_Entries=('Payment Method', 'size'), Paid_Entries=('Is_Paid', 'sum'), Fee_Per_Entry=('Fee_Mult', 'max')).reset_index()
-                
+
                 df_fin['Expected ($)'] = df_fin['Total_Entries'] * df_fin['Fee_Per_Entry']
                 df_fin['Collected ($)'] = df_fin['Paid_Entries'] * df_fin['Fee_Per_Entry']
                 df_fin['Outstanding ($)'] = df_fin['Expected ($)'] - df_fin['Collected ($)']
@@ -2748,7 +2752,7 @@ else:
                     else:
                         if added_players: st.write(f"**➕ Added:** {', '.join(added_players)}")
                         if removed_players: st.write(f"**❌ Removed:** {', '.join(removed_players)}")
-                        
+                    
                         if st.button("🚀 Send Alert Emails", type="primary"):
                             with st.spinner("Sending emails..."):
                                 current_close_dt = datetime.datetime.strptime(settings.get(f"close_time_{t_id}"), "%Y-%m-%d %H:%M:%S") if settings.get(f"close_time_{t_id}") else datetime.datetime.now()
