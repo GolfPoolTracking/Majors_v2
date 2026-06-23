@@ -15,9 +15,20 @@ else:
 
 st.set_page_config(page_title="Golf Sweepstakes", page_icon="⛳", layout="wide")
 
-# 🚨 UPTIMEROBOT INTERCEPTOR (Protects API Quotas) 🚨
+@st.cache_resource
+def get_supabase() -> Client:
+    """Authenticates and returns a persistent Supabase client."""
+    return create_client(st.secrets["supabase"]["url"], st.secrets["supabase"]["key"])
+
+# 🚨 UPTIMEROBOT INTERCEPTOR (Protects API Quotas & Keeps Supabase Awake) 🚨
 if st.query_params.get("view") == "ping":
     st.write("Server is awake and ready! 🟢")
+    try:
+        # Lightweight query to keep Supabase from pausing after 7 days
+        get_supabase().table('tournament_configs').select('tournament_id').limit(1).execute()
+        st.write("Supabase is awake! 🐘🟢")
+    except Exception as e:
+        st.write(f"Supabase ping error: {e}")
     st.stop()
 
 # 🚨 DYNAMIC THEME CSS (FOR DARK MODE SUPPORT) 🚨
@@ -52,10 +63,6 @@ else:
 BASE_URL = "https://golfmajors-v2.streamlit.app/"
 DEFAULT_RULES = """### 🏆 Tournament Rules\n\n⛳ **The Team:** Pick **5** players, max **2** from Top 20.\n\n🏌️‍♂️ **Scoring:** The **best 4 scores** each day count.\n\n✂️ **The Cut:** If **2 or more** picks miss the cut, team is out.\n\n⚖️ **Tie Break:** Predict Winner's total score to par.\n\n⏳ **Deadline:** Midnight before the tournament.\n\n💰 **Entry Fee:** **$30**."""
 
-@st.cache_resource
-def get_supabase() -> Client:
-    """Authenticates and returns a persistent Supabase client."""
-    return create_client(st.secrets["supabase"]["url"], st.secrets["supabase"]["key"])
 
 @st.cache_resource
 def get_api_cache(): return {}
