@@ -25,7 +25,7 @@ if st.query_params.get("view") == "ping":
     st.write("Server is awake and ready! 🟢")
     try:
         # Lightweight query to keep Supabase from pausing after 7 days
-        get_supabase().table('tournament_configs').select('tournament_id').limit(1).execute()
+        get_supabase().table('golf_tournament_configs').select('tournament_id').limit(1).execute()
         st.write("Supabase is awake! 🐘🟢")
     except Exception as e:
         st.write(f"Supabase ping error: {e}")
@@ -213,7 +213,7 @@ def get_dropdown_index(clean_name, fmt_list):
 
 def get_config(t_id, column, default=""):
     try:
-        res = get_supabase().table('tournament_configs').select(column).eq('tournament_id', str(t_id)).execute()
+        res = get_supabase().table('golf_tournament_configs').select(column).eq('tournament_id', str(t_id)).execute()
         if res.data and len(res.data) > 0:
             return res.data[0].get(column) or default
         return default
@@ -224,17 +224,17 @@ def get_config(t_id, column, default=""):
 def update_config(t_id, column, value, t_name=None):
     try:
         sb = get_supabase()
-        existing = sb.table('tournament_configs').select('tournament_id').eq('tournament_id', str(t_id)).execute()
+        existing = sb.table('golf_tournament_configs').select('tournament_id').eq('tournament_id', str(t_id)).execute()
         
         update_data = {column: value}
         if t_name and str(t_name).strip(): 
             update_data['tournament_name'] = str(t_name).strip()
             
         if existing.data:
-            sb.table('tournament_configs').update(update_data).eq('tournament_id', str(t_id)).execute()
+            sb.table('golf_tournament_configs').update(update_data).eq('tournament_id', str(t_id)).execute()
         else:
             update_data['tournament_id'] = str(t_id)
-            sb.table('tournament_configs').insert(update_data).execute()
+            sb.table('golf_tournament_configs').insert(update_data).execute()
         return True
     except Exception as e:
         print(f"DB Write Error ({column}): {e}")
@@ -243,7 +243,7 @@ def update_config(t_id, column, value, t_name=None):
 def log_to_sheet(event_type, message):
     try:
         t_id = st.session_state.get('current_t_id', 'General')
-        get_supabase().table('app_logs').insert({
+        get_supabase().table('golf_app_logs').insert({
             'tournament_id': str(t_id),
             'event_type': event_type,
             'message': message
@@ -384,7 +384,7 @@ def save_payout_config_to_sheet(t_id, json_str):
 def get_raw_sheet_data(t_id):
     if not t_id: return pd.DataFrame()
     try:
-        res = get_supabase().table('tournament_standings').select('*').eq('tournament_id', str(t_id)).order('entry_id').execute()
+        res = get_supabase().table('golf_tournament_standings').select('*').eq('tournament_id', str(t_id)).order('entry_id').execute()
         if not res.data: return pd.DataFrame()
         
         df = pd.DataFrame(res.data)
@@ -591,7 +591,7 @@ def append_entry_to_sheet(t_id, entry_row):
             'pick_5': entry_row[9],
             'paid': False
         }
-        get_supabase().table('entries').insert(data).execute()
+        get_supabase().table('golf_entries').insert(data).execute()
         get_raw_sheet_data.clear() # Instantly update cache
         return True
     except Exception as e: 
@@ -610,7 +610,7 @@ def update_single_cell_in_sheet(t_id, row_number, header_name, new_value):
         }
         col = mapping.get(header_name)
         if col:
-            get_supabase().table('entries').update({col: new_value}).eq('id', row_number).execute()
+            get_supabase().table('golf_entries').update({col: new_value}).eq('id', row_number).execute()
             get_raw_sheet_data.clear()
             return True
         return False
@@ -631,7 +631,7 @@ def update_specific_entry(t_id, row_index, entry_row):
             'pick_4': entry_row[8],
             'pick_5': entry_row[9]
         }
-        get_supabase().table('entries').update(data).eq('id', row_index).execute()
+        get_supabase().table('golf_entries').update(data).eq('id', row_index).execute()
         get_raw_sheet_data.clear()
         return True
     except Exception as e: 
@@ -640,7 +640,7 @@ def update_specific_entry(t_id, row_index, entry_row):
         
 def update_paid_status(t_id, row_index, is_paid):
     try:
-        get_supabase().table('entries').update({'paid': is_paid}).eq('id', row_index).execute()
+        get_supabase().table('golf_entries').update({'paid': is_paid}).eq('id', row_index).execute()
         get_raw_sheet_data.clear()
         return True
     except Exception as e: 
@@ -2706,7 +2706,7 @@ else:
             
             if st.button("📥 Load Remote Logs"):
                 try:
-                    res = get_supabase().table('app_logs').select('*').eq('tournament_id', str(t_id)).order('created_at', desc=True).limit(50).execute()
+                    res = get_supabase().table('golf_app_logs').select('*').eq('tournament_id', str(t_id)).order('created_at', desc=True).limit(50).execute()
                     if res.data: st.dataframe(pd.DataFrame(res.data), width="stretch", hide_index=True)
                     else: st.info("Log table is empty.")
                 except Exception as e: st.error(f"Could not load logs: {e}")
