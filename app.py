@@ -1,5 +1,5 @@
 import streamlit as st, pandas as pd, requests, re, datetime, smtplib, pytz, json, hashlib, altair as alt, time
-import html, threading
+import html, threading, hmac
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.utils import formataddr
@@ -11,7 +11,8 @@ if "payment_options" in st.secrets:
     custom_pays = [p.strip() for p in st.secrets["payment_options"].split(",") if p.strip()]
     pay_opts = ["Select..."] + custom_pays + ["Other"]
 else:
-    pay_opts = ["Select...", "PayPal to ejmcburney@gmail.com", "Zelle to ejmcburney@gmail.com", "Revolut to 083 032 8196", "Other"]
+    # Set `payment_options` in Streamlit secrets (comma-separated) to show your payment methods.
+    pay_opts = ["Select...", "Other"]
 
 st.set_page_config(page_title="Golf Sweepstakes", page_icon="⛳", layout="wide")
 
@@ -52,13 +53,24 @@ if "editing_row" not in st.session_state: st.session_state["editing_row"] = None
 is_public = st.query_params.get("view") == "public"
 target_tourney_id = st.query_params.get("tourney_id")
 
-if "admin_password" in st.secrets:
-    ADMIN_PASSWORD = st.secrets["admin_password"]
-    MAGIC_LINK_SECRET = st.secrets.get("magic_link_secret", ADMIN_PASSWORD)
+ADMIN_PASSWORD = st.secrets.get("admin_password")
+if not ADMIN_PASSWORD and not is_public:
+    st.error("🚨 Configuration Error: `admin_password` is missing from Streamlit Secrets.")
+    st.stop()
+
+# Edit links are signed with `magic_link_secret`. If it isn't set, a separate key is derived
+# from the admin password so the password itself is never used as the signing key.
+if st.secrets.get("magic_link_secret"):
+    MAGIC_LINK_SECRET = str(st.secrets["magic_link_secret"])
 else:
-    if not is_public:
-        st.error("🚨 Configuration Error: `admin_password` is missing from Streamlit Secrets.")
-        st.stop()
+    MAGIC_LINK_SECRET = hmac.new(str(ADMIN_PASSWORD or "").encode(), b"golf-magic-link-v2", hashlib.sha256).hexdigest()
+
+def make_magic_link_hash(email, t_id, ts, secret):
+    msg = f"{str(email).strip().lower()}|{t_id}|{int(ts)}".encode()
+    return hmac.new(str(secret).encode(), msg, hashlib.sha256).hexdigest()
+
+def secure_equals(a, b):
+    return hmac.compare_digest(str(a).encode(), str(b).encode())
 
 BASE_URL = "https://golfmajors-v2.streamlit.app/"
 DEFAULT_RULES = """### 🏆 Tournament Rules\n\n⛳ **The Team:** Pick **5** players, max **2** from Top 20.\n\n🏌️‍♂️ **Scoring:** The **best 4 scores** each day count.\n\n✂️ **The Cut:** If **2 or more** picks miss the cut, team is out.\n\n⚖️ **Tie Break:** Predict Winner's total score to par.\n\n⏳ **Deadline:** Midnight before the tournament.\n\n💰 **Entry Fee:** **$30**."""
@@ -543,7 +555,7 @@ def send_magic_link_email(user_email, t_name, t_id, magic_secret, logo_url=""):
     try:
         ts = int(time.time()) 
         clean_email = str(user_email).strip().lower()
-        auth_hash = hashlib.sha256(f"{clean_email}{str(t_id)}{str(magic_secret)}{ts}".encode()).hexdigest()
+        auth_hash = make_magic_link_hash(clean_email, t_id, ts, magic_secret)
         import urllib.parse
         safe_email = urllib.parse.quote(clean_email)
         link = f"{BASE_URL}?view=public&tourney_id={t_id}&edit_email={safe_email}&auth={auth_hash}&ts={ts}"
@@ -703,7 +715,7 @@ def intelligent_api_call(url, trigger_reason="Unknown"):
     
     for key_name in [current_active] + [k for k in all_keys if k != current_active]:
         try:
-            resp = requests.get(url, headers={"X-RapidAPI-Key": st.secrets[key_name], "X-RapidAPI-Host": "golf-leaderboard-data.p.rapidapi.com"})
+            resp = requests.get(url, headers={"X-RapidAPI-Key": st.secrets[key_name], "X-RapidAPI-Host": "golf-leaderboard-data.p.rapidapi.com"}, timeout=15)
             if resp.status_code == 200:
                 settings["active_api_key"] = key_name
                 quota = resp.headers.get("x-ratelimit-requests-remaining") or resp.headers.get("X-RateLimit-Requests-Remaining")
@@ -1794,9 +1806,9 @@ if is_public:
             clean_email = auth_email_dec.strip().lower()
             ts_int = int(auth_ts)
             
-            if int(time.time()) - ts_int < 3600: 
-                expected_hash = hashlib.sha256(f"{clean_email}{str(tid)}{str(MAGIC_LINK_SECRET)}{ts_int}".encode()).hexdigest()
-                if str(auth_hash) == expected_hash:
+            if 0 <= int(time.time()) - ts_int < 3600: 
+                expected_hash = make_magic_link_hash(clean_email, tid, ts_int, MAGIC_LINK_SECRET)
+                if secure_equals(auth_hash, expected_hash):
                     is_authenticated = True
                     st.html("""
                         <script>
@@ -2171,11 +2183,10 @@ else:
         
         url_token = st.query_params.get("token", "")
         
-        valid_tokens = [str(ADMIN_PASSWORD)]
-        if "admin_token" in st.secrets:
-            valid_tokens.append(str(st.secrets["admin_token"]))
-            
-        is_token_valid = str(url_token).strip() in valid_tokens if url_token else False
+        # Only the dedicated `admin_token` secret is accepted in the URL, never the admin password,
+        # so the password doesn't end up in browser history, shared links or server logs.
+        admin_token = str(st.secrets.get("admin_token", "") or "")
+        is_token_valid = bool(url_token and admin_token) and secure_equals(str(url_token).strip(), admin_token)
         
         if is_token_valid:
             st.session_state["admin_auth"] = True
@@ -2185,7 +2196,7 @@ else:
                 st.warning("⚠️ Invalid token provided in URL.")
                 
             pwd_input = st.text_input("Password", type="password")
-            if pwd_input != ADMIN_PASSWORD:
+            if not pwd_input or not secure_equals(pwd_input, ADMIN_PASSWORD):
                 if pwd_input: st.error("❌ Incorrect password.")
                 st.stop()
             else:
@@ -2211,7 +2222,9 @@ else:
         else:
             c_tour, c_year = st.columns(2)
             with c_tour: tour_val = st.selectbox("Tour", ["2 - PGA Tour", "1 - DP World Tour"])
-            with c_year: year_val = st.selectbox("Season", [2025, 2026, 2027], index=1)
+            with c_year:
+                this_year = datetime.date.today().year
+                year_val = st.selectbox("Season", [this_year - 1, this_year, this_year + 1], index=1)
             
             cache_key_fix = f"fixtures_{tour_val}_{year_val}"
             

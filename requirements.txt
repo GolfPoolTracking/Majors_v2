@@ -1,6 +1,6 @@
-streamlit
-pandas
-requests
-pytz
-supabase
-altair
+streamlit>=1.46,<2
+pandas>=2.2,<4
+requests>=2.31,<3
+pytz>=2024.1
+supabase>=2.0,<3
+altair>=5.0,<7
