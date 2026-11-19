@@ -1,10 +1,56 @@
-import streamlit as st, pandas as pd, requests, re, datetime, smtplib, pytz, json, hashlib, altair as alt, time
-import html, threading, hmac
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from email.utils import formataddr
-from functools import lru_cache
-from supabase import create_client, Client
+import datetime, hashlib, hmac, html, json, re, time
+
+import altair as alt
+import pandas as pd
+import pytz
+import requests
+import streamlit as st
+
+from auth import make_magic_link_hash, secure_equals
+from db import (
+    insert_entry,
+    fetch_alerted_field_from_db,
+    fetch_aliases_from_db,
+    fetch_close_time_from_db,
+    fetch_dns_from_db,
+    fetch_field_backup_from_db,
+    fetch_fin_balances_from_db,
+    fetch_hide_tt_from_db,
+    fetch_logo_from_db,
+    fetch_par_from_db,
+    fetch_payout_config_from_db,
+    fetch_reveal_time_from_db,
+    fetch_short_url_from_db,
+    get_config,
+    get_entries_df,
+    get_supabase,
+    log_event,
+    save_alerted_field_to_db,
+    save_aliases_to_db,
+    save_dns_to_db,
+    save_fin_balances_to_db,
+    save_hide_tt_to_db,
+    save_logo_to_db,
+    save_par_to_db,
+    save_payout_config_to_db,
+    save_short_url_to_db,
+    update_config,
+    update_paid_status,
+    update_entry_field,
+    update_specific_entry,
+)
+from emails import BASE_URL, send_confirmation_email, send_field_change_email, send_magic_link_email
+from golf_api import (
+    fetch_smart_leaderboard,
+    get_api_cache,
+    get_fixture_list,
+    get_formatted_field,
+    get_raw_entry_list,
+    get_settings_cache,
+    get_top_20_players,
+)
+from leaderboard import calculate_leaderboard, get_clean_entries, render_pga_leaderboard
+from scoring import check_api_par_warning, get_calculated_par, get_dropdown_index, safe_int
 
 # 🚨 GLOBAL VARIABLES 🚨
 if "payment_options" in st.secrets:
@@ -16,10 +62,6 @@ else:
 
 st.set_page_config(page_title="Golf Sweepstakes", page_icon="⛳", layout="wide")
 
-@st.cache_resource
-def get_supabase() -> Client:
-    """Authenticates and returns a persistent Supabase client."""
-    return create_client(st.secrets["supabase"]["url"], st.secrets["supabase"]["key"])
 
 # 🚨 UPTIMEROBOT INTERCEPTOR (Protects API Quotas & Keeps Supabase Awake) 🚨
 if st.query_params.get("view") == "ping":
@@ -65,428 +107,9 @@ if st.secrets.get("magic_link_secret"):
 else:
     MAGIC_LINK_SECRET = hmac.new(str(ADMIN_PASSWORD or "").encode(), b"golf-magic-link-v2", hashlib.sha256).hexdigest()
 
-def make_magic_link_hash(email, t_id, ts, secret):
-    msg = f"{str(email).strip().lower()}|{t_id}|{int(ts)}".encode()
-    return hmac.new(str(secret).encode(), msg, hashlib.sha256).hexdigest()
 
-def secure_equals(a, b):
-    return hmac.compare_digest(str(a).encode(), str(b).encode())
-
-BASE_URL = "https://golfmajors-v2.streamlit.app/"
 DEFAULT_RULES = """### 🏆 Tournament Rules\n\n⛳ **The Team:** Pick **5** players, max **2** from Top 20.\n\n🏌️‍♂️ **Scoring:** The **best 4 scores** each day count.\n\n✂️ **The Cut:** If **2 or more** picks miss the cut, team is out.\n\n⚖️ **Tie Break:** Predict Winner's total score to par.\n\n⏳ **Deadline:** Midnight before the tournament.\n\n💰 **Entry Fee:** **$30**."""
 
-
-@st.cache_resource
-def get_api_cache(): return {}
-
-@st.cache_resource
-def get_settings_cache(): return {}
-
-@lru_cache(maxsize=2048)
-def _cached_safe_int_string(s_val):
-    if s_val in ["E", "EVEN", "PAR", "-", ""]: return 0
-    clean = re.sub(r"[^0-9.-]", "", s_val)
-    if not clean or clean == '-': return 0
-    try: return int(float(clean))
-    except Exception: return 0
-
-def safe_int(val):
-    if pd.isna(val): return 0
-    if isinstance(val, int): return val
-    if isinstance(val, float): return int(val)
-    return _cached_safe_int_string(str(val).upper().strip())
-
-def extract_tie_breaker(v): 
-    m = re.search(r'-?\d+', str(v))
-    return int(m.group()) if m and not pd.isna(v) else 0
-
-def format_score(s): return "E" if s == 0 else f"+{s}" if s > 0 else str(s)
-
-def get_corrected_past_total(p, current_r, par_override):
-    past_total = 0
-    for r in p.get('rounds', []):
-        rn = safe_int(r.get('round_number', 0))
-        if rn < current_r:
-            s = safe_int(r.get('strokes', 0))
-            if par_override > 0 and s > 50: past_total += (s - par_override)
-            else: past_total += safe_int(r.get('total_to_par', 0))
-    return past_total
-
-def get_pga_round_score_num(p, r_idx, max_visible_round=4, par_override=0, is_live_scoring_active=False, curr_r=1):
-    stt = p.get('status', '').lower()
-    if stt in ['withdrawn', 'wd', 'disqualified', 'dq']: return 999
-    target_r = r_idx + 1
-    if target_r > max_visible_round: return 999
-    hp = safe_int(p.get('holes_played', 0))
-    api_total = safe_int(p.get('total_to_par', 0))
-    api_past = get_corrected_past_total(p, curr_r, par_override)
-    has_started = (hp > 0) or (api_total != api_past)
-    if is_live_scoring_active and target_r == curr_r and has_started: return api_total - api_past
-    rounds = p.get('rounds', [])
-    if r_idx < len(rounds):
-        s = safe_int(rounds[r_idx].get('strokes', 0))
-        if s == 0: return 999 
-        if par_override > 0 and s > 50 and (target_r < curr_r or stt != 'active'): return s - par_override
-        return safe_int(rounds[r_idx].get('total_to_par', 0))
-    return 999
-
-def format_pga_round_score(p, r_idx, max_visible_round, par_override, is_live_scoring_active, curr_r):
-    target_r = r_idx + 1
-    score = get_pga_round_score_num(p, r_idx, max_visible_round, par_override, is_live_scoring_active, curr_r)
-    if score == 999: return "-"
-    txt = "E" if score == 0 else f"+{score}" if score > 0 else str(score)
-    stt = p.get('status', '').lower()
-    if is_live_scoring_active and stt == 'active' and target_r == curr_r:
-        hp = safe_int(p.get('holes_played', 0))
-        if 0 < hp < 18: txt = f"{txt} ({hp})"
-    return txt
-
-def get_pga_total_num(p, max_visible_round, par_override, is_live_scoring_active, curr_r):
-    stt = p.get('status', '').lower()
-    if stt == 'pre': return 999 
-    if stt in ['withdrawn', 'missed cut', 'disqualified', 'wd', 'cut', 'dq']: return safe_int(p.get('total_to_par', 0))
-    api_total = safe_int(p.get('total_to_par', 0))
-    hp = safe_int(p.get('holes_played', 0))
-    api_past = get_corrected_past_total(p, curr_r, par_override)
-    has_started = (hp > 0) or (api_total != api_past)
-    is_playing_now = stt == 'active' and has_started
-    if is_live_scoring_active and is_playing_now and max_visible_round == curr_r:
-        if par_override > 0:
-            past_score = sum([get_pga_round_score_num(p, i, curr_r - 1, par_override) for i in range(curr_r - 1) if get_pga_round_score_num(p, i, curr_r - 1, par_override) != 999])
-            return past_score + (api_total - api_past)
-        return api_total
-    locked_score = 0
-    has_completed_round = False
-    for r_idx in range(max_visible_round):
-        rs = get_pga_round_score_num(p, r_idx, max_visible_round, par_override, is_live_scoring_active, curr_r)
-        if rs != 999:
-            locked_score += rs
-            has_completed_round = True
-    return locked_score if has_completed_round else 999
-
-def get_pga_thru(p, curr_r, completed_rounds, is_live_scoring_active, tourney_tz_str, target_tz_str, hide_tt=False):
-    stt = p.get('status', '').lower()
-    hp = safe_int(p.get('holes_played', 0))
-    if stt in ['withdrawn', 'missed cut', 'disqualified', 'wd', 'cut', 'dq']: return {'withdrawn': 'WD', 'missed cut': 'CUT', 'disqualified': 'DQ'}.get(stt, stt.upper())
-    if stt in ['completed', 'complete'] or hp == 72 or completed_rounds == 4: return 'F'
-    if is_live_scoring_active and stt == 'active':
-        if hp >= 18: return 'F'
-        if hp > 0: return str(hp)
-        
-    target_r = curr_r if is_live_scoring_active else completed_rounds + 1
-    if target_r > 4: return "-"
-    
-    if hide_tt: 
-        return "Waiting..." if stt == 'active' else "-"
-    
-    for rd in p.get('rounds', []):
-        if safe_int(rd.get('round_number', 0)) == target_r:
-            tt = rd.get('tee_time_local', '')
-            if tt and ':' in tt and tt != "00:00":
-                try:
-                    dt_source = pytz.timezone(tourney_tz_str).localize(datetime.datetime.now().replace(hour=int(tt.split(':')[0]), minute=int(tt.split(':')[1]), second=0, microsecond=0))
-                    return dt_source.astimezone(pytz.timezone(target_tz_str)).strftime('%H:%M')
-                except Exception: return tt
-    if stt == 'active': return "Waiting for tee times..."
-    return "-"
-
-def golf_fmt(x): return "-" if pd.isna(x) or x == 999 else "E" if x == 0 else f"+{int(x)}" if x > 0 else str(int(x))
-
-def get_calculated_par(lb_data):
-    if lb_data:
-        for p in lb_data:
-            for r in p.get('rounds', []):
-                if safe_int(r.get('strokes', 0)) > 0: return str(safe_int(r.get('strokes', 0)) - safe_int(r.get('total_to_par', 0)))
-    return "Waiting..."
-
-def check_api_par_warning(lb_data):
-    if not lb_data: return False
-    current_r = max([safe_int(p.get('current_round', 0)) for p in lb_data] + [1])
-    for p in lb_data:
-        stt = str(p.get('status', '')).lower()
-        if stt in ['complete', 'completed'] or (stt in ['not started', 'notstarted'] and current_r > 1):
-            api_top_ttp = safe_int(p.get('total_to_par', 0))
-            sum_rounds_ttp, valid_rounds = 0, 0
-            for r in p.get('rounds', []):
-                if safe_int(r.get('strokes', 0)) > 0:
-                    sum_rounds_ttp += safe_int(r.get('total_to_par', 0))
-                    valid_rounds += 1
-            if valid_rounds > 0 and api_top_ttp != sum_rounds_ttp: return True
-    return False
-
-def get_dropdown_index(clean_name, fmt_list):
-    if not clean_name or pd.isna(clean_name): return 0
-    sn = str(clean_name).split(" (Top 20")[0].strip().lower()
-    for i, item in enumerate(fmt_list):
-        if item.split(" (Top 20")[0].strip().lower() == sn: return i + 1
-    return 0
-
-# 🚨 SUPABASE DATA ACCESS LAYER 🚨
-
-def get_config(t_id, column, default=""):
-    try:
-        res = get_supabase().table('golf_tournament_configs').select(column).eq('tournament_id', str(t_id)).execute()
-        if res.data and len(res.data) > 0:
-            return res.data[0].get(column) or default
-        return default
-    except Exception as e:
-        print(f"DB Read Error ({column}): {e}")
-        return default
-
-def update_config(t_id, column, value, t_name=None):
-    try:
-        sb = get_supabase()
-        existing = sb.table('golf_tournament_configs').select('tournament_id').eq('tournament_id', str(t_id)).execute()
-        
-        update_data = {column: value}
-        if t_name and str(t_name).strip(): 
-            update_data['tournament_name'] = str(t_name).strip()
-            
-        if existing.data:
-            sb.table('golf_tournament_configs').update(update_data).eq('tournament_id', str(t_id)).execute()
-        else:
-            update_data['tournament_id'] = str(t_id)
-            sb.table('golf_tournament_configs').insert(update_data).execute()
-        return True
-    except Exception as e:
-        print(f"DB Write Error ({column}): {e}")
-        return False
-
-def log_to_sheet(event_type, message):
-    try:
-        t_id = st.session_state.get('current_t_id', 'General')
-        get_supabase().table('golf_app_logs').insert({
-            'tournament_id': str(t_id),
-            'event_type': event_type,
-            'message': message
-        }).execute()
-    except Exception as e: 
-        print(f"DB Error (log_to_db): {e}")
-
-def save_api_backup_to_sheet(t_id, full_data):
-    t_name = ""
-    try:
-        t_name = full_data.get('results', {}).get('tournament', {}).get('name', '')
-    except Exception:
-        pass
-    return update_config(t_id, 'api_backup', full_data, t_name=t_name)
-
-def fetch_api_backup_from_sheet(t_id):
-    data = get_config(t_id, 'api_backup', {})
-    return data if data else None
-
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_close_time_from_db(t_id):
-    return get_config(t_id, 'close_time', "")
-
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_reveal_time_from_db(t_id):
-    return get_config(t_id, 'reveal_time', "")
-
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_field_backup_from_sheet(t_id):
-    return get_config(t_id, 'field_backup', "")
-
-def save_field_backup_to_sheet(t_id, field_string):
-    if update_config(t_id, 'field_backup', field_string):
-        fetch_field_backup_from_sheet.clear()
-        return True
-    return False
-
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_dns_from_sheet(t_id):
-    return get_config(t_id, 'dns_list', "")
-
-def save_dns_to_sheet(t_id, dns_string):
-    if update_config(t_id, 'dns_list', dns_string):
-        fetch_dns_from_sheet.clear()
-        return True
-    return False
-
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_short_url_from_sheet(t_id):
-    return get_config(t_id, 'short_url', "")
-
-def save_short_url_to_sheet(t_id, short_url):
-    if update_config(t_id, 'short_url', short_url):
-        fetch_short_url_from_sheet.clear()
-        return True
-    return False
-
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_fin_balances_from_sheet(t_id):
-    val = get_config(t_id, 'fin_balances', {})
-    return json.dumps(val) if isinstance(val, dict) else val
-
-def save_fin_balances_to_sheet(t_id, json_str):
-    try:
-        val = json.loads(json_str)
-        if update_config(t_id, 'fin_balances', val):
-            fetch_fin_balances_from_sheet.clear()
-            return True
-        return False
-    except Exception: return False
-
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_alerted_field_from_sheet(t_id):
-    return get_config(t_id, 'alerted_field', "")
-
-def save_alerted_field_to_sheet(t_id, field_string):
-    if update_config(t_id, 'alerted_field', field_string):
-        fetch_alerted_field_from_sheet.clear()
-        return True
-    return False
-
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_par_from_sheet(t_id):
-    try: return int(get_config(t_id, 'manual_par', 0))
-    except Exception: return 0
-
-def save_par_to_sheet(t_id, par_value):
-    if update_config(t_id, 'manual_par', par_value):
-        fetch_par_from_sheet.clear()
-        return True
-    return False
-
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_logo_from_sheet(t_id):
-    return get_config(t_id, 'logo_url', "")
-
-def save_logo_to_sheet(t_id, logo_url):
-    if update_config(t_id, 'logo_url', logo_url):
-        fetch_logo_from_sheet.clear()
-        return True
-    return False
-
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_aliases_from_sheet(t_id):
-    return get_config(t_id, 'name_aliases', "")
-
-def save_aliases_to_sheet(t_id, alias_string):
-    if update_config(t_id, 'name_aliases', alias_string):
-        fetch_aliases_from_sheet.clear()
-        return True
-    return False
-
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_hide_tt_from_sheet(t_id):
-    return get_config(t_id, 'hide_tee_times', False)
-
-def save_hide_tt_to_sheet(t_id, hide_tt_bool):
-    if update_config(t_id, 'hide_tee_times', hide_tt_bool):
-        fetch_hide_tt_from_sheet.clear()
-        return True
-    return False
-
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_payout_config_from_sheet(t_id):
-    val = get_config(t_id, 'payout_config', {})
-    return json.dumps(val) if isinstance(val, dict) else "{}"
-
-def save_payout_config_to_sheet(t_id, json_str):
-    try:
-        val = json.loads(json_str)
-        if update_config(t_id, 'payout_config', val):
-            fetch_payout_config_from_sheet.clear()
-            return True
-        return False
-    except Exception: return False
-
-@st.cache_data(ttl=120, show_spinner=False)
-def get_raw_sheet_data(t_id):
-    if not t_id: return pd.DataFrame()
-    try:
-        res = get_supabase().table('golf_tournament_standings').select('*').eq('tournament_id', str(t_id)).order('entry_id').execute()
-        if not res.data: return pd.DataFrame()
-        
-        df = pd.DataFrame(res.data)
-        
-        df = df.rename(columns={
-            'entry_id': 'Sheet_Row',
-            'participant_name': 'Name',
-            'email': 'Email',
-            'payment_method': 'Payment Method',
-            'tie_breaker': 'Tie Breaker',
-            'paid': 'Paid'
-        })
-        
-        if 'picks' in df.columns:
-            for i in range(5):
-                df[f'Pick {i+1}'] = df['picks'].apply(lambda x: x[i] if isinstance(x, list) and len(x) > i else "")
-            
-        return df.copy()
-    except Exception as e:
-        print(f"DB Read Error (tournament_standings view): {e}")
-        return pd.DataFrame()
-
-# 🚨 BACKGROUND EMAIL SENDER 🚨
-def _send_email_async(msg, sender, pwd):
-    try:
-        server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()
-        server.login(sender, pwd)
-        server.send_message(msg) 
-        server.quit()
-    except Exception as e:
-        print(f"Async Email Error: {e}")
-
-def send_field_change_email(user_email, name, removed_picks, added_to_field, t_name, t_id, close_time_str, logo_url):
-    sender, pwd = st.secrets.get("email_sender"), st.secrets.get("email_password")
-    if not sender or not pwd: return False
-    try:
-        msg = MIMEMultipart()
-        msg['From'] = formataddr((t_name, sender))
-        msg['To'] = user_email
-        
-        logo_html = f'<div style="text-align: center; margin-bottom: 20px;"><img src="{logo_url}" style="max-height: 85px; max-width: 100%;" alt="{t_name} Logo"></div>' if logo_url else f'<div style="text-align: center; border-bottom: 2px solid #2ecc71; padding-bottom: 10px; margin-bottom: 20px;"><h2 style="color: #27ae60; margin: 0;">{t_name} Sweepstakes</h2></div>'
-        public_link = f"{BASE_URL}?view=public&tourney_id={t_id}"
-        
-        blocks = []
-        subject = f"{t_name} - ⚠️ Tournament Field Update"
-        
-        if removed_picks:
-            subject = f"{t_name} - 🚨 URGENT: Action Required for your Team"
-            p_html = "".join([f"<li style='padding: 4px 0;'><b>{html.escape(p)}</b></li>" for p in removed_picks])
-            blocks.append(f"""
-            <div style="background-color: #fff3e0; border-left: 4px solid #e67e22; padding: 15px 20px; border-radius: 4px; margin: 20px 0;">
-                <h3 style="margin-top:0; color: #d35400; font-size: 18px;">🚨 Player(s) Withdrawn</h3>
-                <p style="font-size: 15px;">One or more players you selected are no longer in the tournament field:</p>
-                <ul style="font-size: 15px; color: #c0392b;">{p_html}</ul>
-                <p style="font-size: 15px; font-weight: bold;">Please go to the Tournament Dashboard to update your entry before the deadline: <br><span style="color:#d35400;">{close_time_str}</span>.</p>
-            </div>
-            """)
-            
-        if added_to_field:
-            p_html = "".join([f"<li>{html.escape(p)}</li>" for p in added_to_field])
-            blocks.append(f"""
-            <div style="background-color: #e8f8f5; border-left: 4px solid #1abc9c; padding: 15px 20px; border-radius: 4px; margin: 20px 0;">
-                <h3 style="margin-top:0; color: #16a085; font-size: 18px;">⛳ New Players Added</h3>
-                <p style="font-size: 15px;">The following players have just been added to the tournament field. You may edit your team to include them if you wish:</p>
-                <ul style="font-size: 15px; color: #2c3e50;">{p_html}</ul>
-            </div>
-            """)
-            
-        body = f"""
-        <html>
-          <body style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #2c3e50; line-height: 1.6; max-width: 600px; margin: 0 auto; padding: 20px;">
-            {logo_html}
-            <p style="font-size: 16px;">Hi <b>{html.escape(name)}</b>,</p>
-            {"".join(blocks)}
-            
-            <div style="text-align: center; margin-top: 35px; margin-bottom: 20px;">
-                <a href="{public_link}" target="_blank" style="background-color: #34495e; color: white; padding: 12px 24px; text-decoration: none; border-radius: 4px; display: inline-block; font-weight: bold; font-size: 15px;">Go to Tournament Dashboard</a>
-            </div>
-          </body>
-        </html>
-        """
-        msg['Subject'] = subject
-        msg.attach(MIMEText(body, 'html'))
-        
-        threading.Thread(target=_send_email_async, args=(msg, sender, pwd)).start()
-        return True
-    except Exception as e: 
-        print(f"Email Error (send_field_change): {e}")
-        return False
 
 def generate_short_link(long_url):
     try:
@@ -497,1162 +120,9 @@ def generate_short_link(long_url):
         print(f"URL Shortener Error: {e}")
     return None
 
-def send_confirmation_email(user_email, name, picks, tie_breaker, payment, t_name, t_id, is_edit=False, close_time_str="", logo_url=""):
-    sender, pwd = st.secrets.get("email_sender"), st.secrets.get("email_password")
-    if not sender or not pwd: return False
-    try:
-        msg = MIMEMultipart()
-        msg['From'] = formataddr((t_name, sender))
-        msg['To'] = user_email
-        status_word = "UPDATED" if is_edit else "LOCKED IN"
-        msg['Subject'] = f"{t_name} - ⛳ Your Team is {status_word}"
-        
-        p_html = "".join([f"<li style='padding: 4px 0;'><b>{html.escape(p)}</b></li>" for p in picks])
-        public_link = f"{BASE_URL}?view=public&tourney_id={t_id}"
-        
-        edit_notice = f"<p style='color: #e67e22; font-size: 14px; background-color: #fff3e0; padding: 10px; border-radius: 4px; border-left: 3px solid #e67e22;'>✏️ <b>Need to make a change?</b> You can edit your team anytime before <b>{close_time_str}</b>. Just go to the <a href='{public_link}' target='_blank'>Tournament Dashboard</a>, click the <b>🔍 Check Entry</b> tab, and enter your email address to securely unlock your entry!</p>" if close_time_str else ""
-        
-        logo_html = f'<div style="text-align: center; margin-bottom: 20px;"><img src="{logo_url}" style="max-height: 85px; max-width: 100%;" alt="{t_name} Logo"></div>' if logo_url else f'<div style="text-align: center; border-bottom: 2px solid #2ecc71; padding-bottom: 10px; margin-bottom: 20px;"><h2 style="color: #27ae60; margin: 0;">{t_name} Sweepstakes</h2></div>'
-        
-        body = f"""
-        <html>
-          <body style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #2c3e50; line-height: 1.6; max-width: 600px; margin: 0 auto; padding: 20px;">
-            {logo_html}
-            <p style="font-size: 16px;">Hi <b>{html.escape(name)}</b>,</p>
-            <p style="font-size: 16px;">Your entry has been securely <b>{status_word.lower()}</b>! Here are your official team picks for the tournament:</p>
-            
-            <div style="background-color: #f8f9fa; border-left: 4px solid #2ecc71; padding: 15px 20px; border-radius: 4px; margin: 20px 0;">
-                <h3 style="margin-top:0; color: #2c3e50; font-size: 18px;">🏌️ Your Starting 5</h3>
-                <ul style="font-size: 16px; list-style-type: none; padding-left: 0;">
-                  {p_html}
-                </ul>
-                <hr style="border: 0; border-top: 1px solid #dee2e6; margin: 15px 0;">
-                <p style="margin: 5px 0; font-size: 15px;"><b>Tie Breaker Score:</b> <span style="color: #2980b9; font-weight: bold;">{tie_breaker}</span></p>
-                <p style="margin: 5px 0; font-size: 15px;"><b>Payment Method:</b> {html.escape(payment)}</p>
-            </div>
-            
-            {edit_notice}
-            
-            <div style="text-align: center; margin: 35px 0 20px 0;">
-                <a href="{public_link}" target="_blank" style="background-color: #34495e; color: white; padding: 12px 24px; text-decoration: none; border-radius: 4px; display: inline-block; font-weight: bold; font-size: 15px;">View Live Leaderboard</a>
-            </div>
-          </body>
-        </html>
-        """
-        msg.attach(MIMEText(body, 'html'))
-        
-        msg['Bcc'] = sender 
-        
-        threading.Thread(target=_send_email_async, args=(msg, sender, pwd)).start()
-        return True
-    except Exception as e: 
-        print(f"Email Error (send_confirmation): {e}")
-        return False
 
-def send_magic_link_email(user_email, t_name, t_id, magic_secret, logo_url=""):
-    sender, pwd = st.secrets.get("email_sender"), st.secrets.get("email_password")
-    if not sender or not pwd: return False
-    try:
-        ts = int(time.time()) 
-        clean_email = str(user_email).strip().lower()
-        auth_hash = make_magic_link_hash(clean_email, t_id, ts, magic_secret)
-        import urllib.parse
-        safe_email = urllib.parse.quote(clean_email)
-        link = f"{BASE_URL}?view=public&tourney_id={t_id}&edit_email={safe_email}&auth={auth_hash}&ts={ts}"
         
-        msg = MIMEMultipart()
-        msg['From'] = formataddr((t_name, sender))
-        msg['To'] = user_email
-        msg['Subject'] = f"{t_name} - 🔐 Secure Edit Link"
-        
-        logo_html = f'<div style="text-align: center; margin-bottom: 20px;"><img src="{logo_url}" style="max-height: 85px; max-width: 100%;" alt="{t_name} Logo"></div>' if logo_url else ""
-        
-        body = f"""
-        <html>
-          <body style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #2c3e50; line-height: 1.6; max-width: 600px; margin: 0 auto; padding: 20px;">
-            {logo_html}
-            <p style="font-size: 16px;">Hi,</p>
-            <p style="font-size: 16px;">You requested a secure link to edit your team for the <b>{t_name} Sweepstakes</b>.</p>
-            <div style="text-align: center; margin: 30px 0;">
-                <a href="{link}" target="_blank" style="background-color: #34495e; color: white; padding: 12px 24px; text-decoration: none; border-radius: 4px; display: inline-block; font-weight: bold; font-size: 15px;">✏️ Edit Your Team</a>
-            </div>
-            <p style="font-size: 14px; color: #7f8c8d;">This link is uniquely tied to your email address and grants direct access to your entry form. For security, this link will automatically expire in 1 hour.</p>
-          </body>
-        </html>
-        """
-        msg.attach(MIMEText(body, 'html'))
-        
-        threading.Thread(target=_send_email_async, args=(msg, sender, pwd)).start()
-        return True
-    except Exception as e: 
-        print(f"Email Error (send_magic_link): {e}")
-        return False
 
-def append_entry_to_sheet(t_id, entry_row):
-    try:
-        data = {
-            'tournament_id': str(t_id),
-            'name': entry_row[1],
-            'email': entry_row[2],
-            'payment_method': entry_row[3],
-            'tie_breaker': int(entry_row[4]),
-            'pick_1': entry_row[5],
-            'pick_2': entry_row[6],
-            'pick_3': entry_row[7],
-            'pick_4': entry_row[8],
-            'pick_5': entry_row[9],
-            'paid': False
-        }
-        get_supabase().table('golf_entries').insert(data).execute()
-        get_raw_sheet_data.clear() # Instantly update cache
-        return True
-    except Exception as e: 
-        print(f"DB Error (append_entry): {e}")
-        return False
-
-def update_single_cell_in_sheet(t_id, row_number, header_name, new_value):
-    try:
-        mapping = {
-            "Payment Method": "payment_method",
-            "Pick 1": "pick_1",
-            "Pick 2": "pick_2",
-            "Pick 3": "pick_3",
-            "Pick 4": "pick_4",
-            "Pick 5": "pick_5"
-        }
-        col = mapping.get(header_name)
-        if col:
-            get_supabase().table('golf_entries').update({col: new_value}).eq('id', row_number).execute()
-            get_raw_sheet_data.clear()
-            return True
-        return False
-    except Exception as e:
-        print(f"DB Error (update_single_cell): {e}")
-        return False
-
-def update_specific_entry(t_id, row_index, entry_row):
-    try:
-        data = {
-            'name': entry_row[1],
-            'email': entry_row[2],
-            'payment_method': entry_row[3],
-            'tie_breaker': int(entry_row[4]),
-            'pick_1': entry_row[5],
-            'pick_2': entry_row[6],
-            'pick_3': entry_row[7],
-            'pick_4': entry_row[8],
-            'pick_5': entry_row[9]
-        }
-        get_supabase().table('golf_entries').update(data).eq('id', row_index).execute()
-        get_raw_sheet_data.clear()
-        return True
-    except Exception as e: 
-        print(f"DB Error (update_specific_entry): {e}")
-        return False
-        
-def update_paid_status(t_id, row_index, is_paid):
-    try:
-        get_supabase().table('golf_entries').update({'paid': is_paid}).eq('id', row_index).execute()
-        get_raw_sheet_data.clear()
-        return True
-    except Exception as e: 
-        print(f"DB Error (update_paid_status): {e}")
-        return False
-
-def send_admin_api_alert(url, error_details):
-    sender, pwd = st.secrets.get("email_sender"), st.secrets.get("email_password")
-    if not sender or not pwd: return False
-    
-    settings = get_settings_cache()
-    last_alert = settings.get("last_api_alert_time")
-    now = datetime.datetime.now()
-    
-    if last_alert and (now - last_alert).total_seconds() < 3600:
-        return False
-        
-    try:
-        msg = MIMEMultipart()
-        msg['From'] = formataddr(("Golf App Alert", sender))
-        msg['To'] = sender  
-        msg['Subject'] = "🚨 URGENT: API Calls Failing / Quota Exhausted"
-        
-        body = f"""
-        <html>
-          <body style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #2c3e50; line-height: 1.6; max-width: 600px; margin: 0 auto; padding: 20px;">
-            <div style="text-align: center; border-bottom: 2px solid #e74c3c; padding-bottom: 10px; margin-bottom: 20px;">
-                <h2 style="color: #c0392b; margin: 0;">🚨 Critical API Failure</h2>
-            </div>
-            <p style="font-size: 16px;">The application attempted to fetch live data but <b>all available API keys failed</b>.</p>
-            <p style="font-size: 16px; color: #d35400;"><b>This likely means you have exhausted your API quotas across all registered keys!</b></p>
-            
-            <div style="background-color: #f8f9fa; border-left: 4px solid #e74c3c; padding: 15px; border-radius: 4px; margin: 20px 0; font-family: monospace; font-size: 14px;">
-                <p style="margin: 0 0 10px 0;"><b>Endpoint:</b><br>{url}</p>
-                <p style="margin: 0;"><b>Last Error:</b><br>{error_details}</p>
-            </div>
-            
-            <p style="font-size: 15px;">Please log in to your RapidAPI dashboard to check your usage and update your keys in the Streamlit secrets if necessary.</p>
-            <p style="font-size: 12px; color: #7f8c8d; margin-top: 30px;"><i>Note: To prevent spam, this alert is limited to a maximum of 1 email per hour.</i></p>
-          </body>
-        </html>
-        """
-        msg.attach(MIMEText(body, 'html'))
-        
-        threading.Thread(target=_send_email_async, args=(msg, sender, pwd)).start()
-        
-        settings["last_api_alert_time"] = now
-        return True
-    except Exception as e:
-        print(f"Email Error (send_admin_api_alert): {e}")
-        return False
-
-def intelligent_api_call(url, trigger_reason="Unknown"):
-    settings = get_settings_cache()
-    all_keys = [k for k in st.secrets.keys() if "api" in k.lower() and "key" in k.lower()]
-    if not all_keys: return None 
-    current_active = settings.get("active_api_key", all_keys[0])
-    
-    last_error = "Unknown Error"
-    
-    for key_name in [current_active] + [k for k in all_keys if k != current_active]:
-        try:
-            resp = requests.get(url, headers={"X-RapidAPI-Key": st.secrets[key_name], "X-RapidAPI-Host": "golf-leaderboard-data.p.rapidapi.com"}, timeout=15)
-            if resp.status_code == 200:
-                settings["active_api_key"] = key_name
-                quota = resp.headers.get("x-ratelimit-requests-remaining") or resp.headers.get("X-RateLimit-Requests-Remaining")
-                if quota is not None:
-                    settings[f"quota_{key_name}"] = str(quota)
-                
-                endpoint = url.split(".com/")[-1] 
-                log_to_sheet("API CALL", f"Success ({endpoint}) | Reason: {trigger_reason} | Quota Left: {quota}")
-                
-                return resp.json()
-            else:
-                last_error = f"HTTP {resp.status_code}: {resp.text}"
-        except Exception as e: 
-            last_error = str(e)
-            continue
-            
-    log_to_sheet("API CRITICAL", f"All keys failed for {url}. Last Error: {last_error}")
-    send_admin_api_alert(url, last_error)
-    return None 
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def get_fixture_list(tour_id, year):
-    data = intelligent_api_call(f"https://golf-leaderboard-data.p.rapidapi.com/fixtures/{tour_id}/{year}", "Fixture Fetch")
-    if data: return {f"{f.get('name')} ({f.get('start_date')[:10]})": {"id": f.get('id'), "start": f.get('start_date')} for f in data.get('results', [])}
-    return {}
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def get_top_20_players():
-    data = intelligent_api_call("https://golf-leaderboard-data.p.rapidapi.com/world-rankings", "OWGR Fetch")
-    if data:
-        raw = data.get('results', [])
-        rank_data = raw.get('rankings', []) or raw.get('world_rankings', []) if isinstance(raw, dict) else raw
-        return {p.get('player_name', '').strip().lower(): i + 1 for i, p in enumerate(rank_data[:20])}
-    return {}
-
-def get_raw_entry_list(selected_t_id):
-    cache = get_api_cache()
-    cache_key = f"entry_list_{selected_t_id}"
-    now = datetime.datetime.now()
-    
-    if cache_key in cache and now < cache[cache_key]['expire']: 
-        return cache[cache_key]['data']
-        
-    data = intelligent_api_call(f"https://golf-leaderboard-data.p.rapidapi.com/entry-list/{selected_t_id}", "Entry List Fetch")
-    
-    if data and data.get('results'):
-        clean_list = [f"{p.get('first_name', '')} {p.get('last_name', '')}".strip() for p in data['results'].get('entry_list', [])]
-        
-        expire_time = now + datetime.timedelta(hours=1) if clean_list else now + datetime.timedelta(minutes=15)
-        cache[cache_key] = {'data': clean_list, 'expire': expire_time}
-        return clean_list
-        
-    if cache_key in cache: return cache[cache_key]['data']
-    
-    cache[cache_key] = {'data': [], 'expire': now + datetime.timedelta(minutes=5)}
-    return []
-
-def get_formatted_field(selected_t_id, top_20_dict):
-    raw_field = get_raw_entry_list(selected_t_id)
-    
-    if not raw_field and selected_t_id:
-        backup_str = fetch_field_backup_from_sheet(selected_t_id)
-        if backup_str: return [x.strip() for x in backup_str.split(',') if x.strip()]
-        return []
-    
-    top_20_items = []
-    regular_list = []
-    for p in raw_field:
-        p_lower = p.lower()
-        if p_lower in top_20_dict:
-            rank = top_20_dict[p_lower]
-            top_20_items.append((rank, f"{p} (Top 20 - #{rank})"))
-        else:
-            regular_list.append(p)
-            
-    top_20_sorted = [item[1] for item in sorted(top_20_items, key=lambda x: x[0])]
-    formatted_field = top_20_sorted + sorted(regular_list)
-    
-    if formatted_field and selected_t_id:
-        backup_str = fetch_field_backup_from_sheet(selected_t_id)
-        current_str = ",".join(formatted_field)
-        if backup_str != current_str: save_field_backup_to_sheet(selected_t_id, current_str)
-        
-    return formatted_field
-
-def fetch_smart_leaderboard(selected_t_id):
-    cache = get_api_cache()
-    now = datetime.datetime.now()
-    cache_key = f"lb_{selected_t_id}"
-    
-    if cache_key in cache and now < cache[cache_key]["next_fetch_allowed"]:
-        return cache[cache_key]["data"], cache[cache_key]["next_fetch_allowed"], cache[cache_key]["last_fetch"], cache[cache_key]["full_data"], "⚡ Active Memory Cache"
-        
-    data = intelligent_api_call(f"https://golf-leaderboard-data.p.rapidapi.com/leaderboard/{selected_t_id}")
-    if data and data.get('results'):
-        lb_data = data.get('results', {}).get('leaderboard', [])
-        
-        raw_results = data.get('results') or {}
-        tourney_data = raw_results.get('tournament') or {}
-        live_details = tourney_data.get('live_details') or {}
-        
-        t_status = str(live_details.get('status', '')).lower()
-        
-        api_curr_r = safe_int(live_details.get('current_round', 0))
-        player_curr_r = max([safe_int(p.get('current_round', 0)) for p in lb_data] + [0])
-        current_r = max(api_curr_r, player_curr_r)
-        
-        players_in_curr_round = [p for p in lb_data if safe_int(p.get('current_round', 0)) == current_r and p.get('status', '').lower() not in ['cut', 'wd', 'dq', 'withdrawn', 'missed cut']]
-        
-        has_started_curr = any(safe_int(p.get('holes_played', 0)) > 0 or p.get('status', '').lower() in ['active', 'complete', 'completed'] for p in players_in_curr_round)
-        
-        if not has_started_curr and current_r > 1 and t_status not in ['completed', 'complete']:
-            current_r -= 1
-            t_status = 'endofday'
-            live_details['current_round'] = current_r
-            live_details['status'] = t_status
-        else:
-            live_details['current_round'] = current_r
-        
-        for p in lb_data:
-            stt = str(p.get('status', '')).lower()
-            if stt in ['not started', 'notstarted'] and safe_int(p.get('holes_played', 0)) == 0:
-                total_strokes = sum(safe_int(r.get('strokes', 0)) for r in p.get('rounds', []))
-                if total_strokes == 0 and (current_r > 1 or t_status in ['completed', 'endofday']):
-                    p['status'] = 'Withdrawn'
-        
-        mode = "⛳ Active Play"
-        next_fetch = now + datetime.timedelta(minutes=60)
-        
-        try:
-            tourney_tz_str = tourney_data.get('timezone') or 'America/New_York'
-            tourney_tz = pytz.timezone(tourney_tz_str)
-            now_utc = datetime.datetime.now(pytz.utc)
-            now_tourney = now_utc.astimezone(tourney_tz)
-            
-            target_r = current_r if current_r > 0 else 1
-            
-            # Check if all players in target round are done, but API hasn't rolled status to endofday
-            players_in_target = [p for p in lb_data if safe_int(p.get('current_round', 0)) == target_r and p.get('status', '').lower() not in ['cut', 'wd', 'dq', 'withdrawn', 'missed cut']]
-            all_target_complete = len(players_in_target) > 0 and all(p.get('status', '').lower() in ['complete', 'completed'] for p in players_in_target)
-            
-            prev_min_tt_str = "23:59"
-            min_tt_str, max_tt_str = "23:59", "00:00"
-            
-            for p in lb_data:
-                for r in p.get('rounds', []):
-                    r_num = safe_int(r.get('round_number', 0))
-                    tt = r.get('tee_time_local', '')
-                    if tt and ':' in tt:
-                        if r_num == target_r:
-                            if tt < min_tt_str: min_tt_str = tt
-                            if tt > max_tt_str: max_tt_str = tt
-                        elif r_num == target_r - 1:
-                            if tt < prev_min_tt_str: prev_min_tt_str = tt
-                            
-            has_tee_times = (max_tt_str != "00:00" and min_tt_str != "23:59")
-            
-            if t_status in ['completed', 'complete']:
-                next_fetch = now + datetime.timedelta(minutes=1440)
-                mode = "🏁 Finished (24h)"
-            elif t_status in ['suspended', 'endofday']:
-                next_fetch = now + datetime.timedelta(minutes=60)
-                mode = f"⏸️ {t_status.title()} (1h)"
-            elif all_target_complete and t_status == 'inprogress':
-                # 🚨 FAIL-SAFE 1: Round is done but API hasn't rolled over to next round yet
-                next_fetch = now + datetime.timedelta(minutes=10)
-                mode = f"⏳ API Lag: Waiting for R{target_r + 1} Rollover (10m)"
-            elif not has_tee_times:
-                # 🚨 FAIL-SAFE 2: No tee times yet, but it's the weekend
-                if current_r >= 3 and t_status == 'inprogress':
-                    start_polling_dt = None
-                    if prev_min_tt_str != "23:59":
-                        parts = prev_min_tt_str.split(':')
-                        # Construct target time using the previous round's hour/minute
-                        start_polling_dt = now_tourney.replace(hour=int(parts[0]), minute=int(parts[1]), second=0, microsecond=0)
-                        
-                        # If that time is in the past, and it's > 6 hours ago, we are likely on the night before.
-                        # Add a day so it sleeps until tomorrow morning.
-                        if start_polling_dt < now_tourney:
-                            if (now_tourney - start_polling_dt).total_seconds() > 21600: 
-                                start_polling_dt += datetime.timedelta(days=1)
-                                
-                    if start_polling_dt and now_tourney < start_polling_dt:
-                        # Sleep until the previous round's start time
-                        wait_sec = (start_polling_dt - now_tourney).total_seconds()
-                        next_fetch = now + datetime.timedelta(seconds=max(60, wait_sec))
-                        mode = f"😴 Sleep until R{target_r-1} start time ({prev_min_tt_str})"
-                    else:
-                        # We have crossed the threshold, aggressively poll for tee times
-                        next_fetch = now + datetime.timedelta(minutes=10)
-                        mode = f"⏳ API Lag: Awaiting R{target_r} Times (10m)"
-                else:
-                    next_fetch = now + datetime.timedelta(minutes=240)
-                    mode = "😴 Waiting for Tee Times (4h)"
-            else:
-                min_tt_parts = min_tt_str.split(':')
-                max_tt_parts = max_tt_str.split(':')
-                
-                first_tt_dt = now_tourney.replace(hour=int(min_tt_parts[0]), minute=int(min_tt_parts[1]), second=0, microsecond=0)
-                last_tt_dt = now_tourney.replace(hour=int(max_tt_parts[0]), minute=int(max_tt_parts[1]), second=0, microsecond=0)
-                
-                if t_status == 'pre' and first_tt_dt < now_tourney:
-                    first_tt_dt += datetime.timedelta(days=1)
-                    last_tt_dt += datetime.timedelta(days=1)
-
-                first_check_dt = first_tt_dt + datetime.timedelta(minutes=30)
-                
-                if target_r < 4:
-                    # 🚨 R1-3 LOGIC: Sleep until 4.5 hours after the LAST tee time
-                    end_of_play_dt = last_tt_dt + datetime.timedelta(hours=4, minutes=30)
-                    
-                    if now_tourney < first_check_dt:
-                        wait_sec = (first_check_dt - now_tourney).total_seconds()
-                        next_fetch = now + datetime.timedelta(seconds=max(60, wait_sec))
-                        mode = f"⏳ Wait for R{target_r} Start (+30m after 1st TT)"
-                    elif now_tourney < end_of_play_dt:
-                        wait_sec = (end_of_play_dt - now_tourney).total_seconds()
-                        next_fetch = now + datetime.timedelta(seconds=max(60, wait_sec))
-                        mode = f"😴 Awaiting R{target_r} Finish (4.5h after last TT)"
-                    else:
-                        next_fetch = now + datetime.timedelta(minutes=30)
-                        mode = f"⏳ Checking for R{target_r} Completion (30m)"
-                else:
-                    # 🚨 R4 LOGIC: Live Scoring (10 min after last tee time -> 5m loops)
-                    live_scoring_start_dt = last_tt_dt + datetime.timedelta(minutes=10)
-                    
-                    if now_tourney < first_check_dt:
-                        wait_sec = (first_check_dt - now_tourney).total_seconds()
-                        next_fetch = now + datetime.timedelta(seconds=max(60, wait_sec))
-                        mode = f"⏳ Wait for R{target_r} Start (+30m after 1st TT)"
-                    elif now_tourney < live_scoring_start_dt:
-                        wait_sec = (live_scoring_start_dt - now_tourney).total_seconds()
-                        next_fetch = now + datetime.timedelta(seconds=max(60, wait_sec))
-                        mode = f"⏳ Wait for R{target_r} Last TT (+10m)"
-                    else:
-                        next_fetch = now + datetime.timedelta(minutes=5)
-                        mode = f"🔥 R{target_r} Live Scoring (5m)"
-
-        except Exception as e:
-            log_to_sheet("TZ/TT ERROR", str(e))
-            next_fetch = now + datetime.timedelta(minutes=60)
-            mode = "⛳ Active Play (Fallback 1h)"
-        
-        cache[cache_key] = {"data": lb_data, "last_fetch": now, "next_fetch_allowed": next_fetch, "mode": mode, "full_data": data}
-        if selected_t_id: save_api_backup_to_sheet(selected_t_id, data)
-        return lb_data, next_fetch, now, data, "📡 Live API"
-        
-    if selected_t_id:
-        backup_data = fetch_api_backup_from_sheet(selected_t_id)
-        if backup_data and backup_data.get('results'):
-            lb_data = backup_data.get('results', {}).get('leaderboard', [])
-            live_details = backup_data.get('results', {}).get('tournament', {}).get('live_details', {})
-            t_status = str(live_details.get('status', '')).lower()
-            current_r = live_details.get('current_round') or max([safe_int(p.get('current_round', 0)) for p in lb_data] + [0])
-            
-            players_in_curr_round = [p for p in lb_data if safe_int(p.get('current_round', 0)) == current_r and p.get('status', '').lower() not in ['cut', 'wd', 'dq', 'withdrawn', 'missed cut']]
-            has_started_curr = any(safe_int(p.get('holes_played', 0)) > 0 or p.get('status', '').lower() == 'active' for p in players_in_curr_round)
-            if not has_started_curr and current_r > 1 and t_status not in ['completed', 'complete']:
-                current_r -= 1
-                t_status = 'endofday'
-                live_details['current_round'] = current_r
-                live_details['status'] = t_status
-            
-            for p in lb_data:
-                stt = str(p.get('status', '')).lower()
-                if stt in ['not started', 'notstarted'] and safe_int(p.get('holes_played', 0)) == 0:
-                    total_strokes = sum(safe_int(r.get('strokes', 0)) for r in p.get('rounds', []))
-                    if total_strokes == 0 and (current_r > 1 or t_status in ['completed', 'endofday']):
-                        p['status'] = 'Withdrawn'
-                        
-            next_fetch = now + datetime.timedelta(minutes=5) 
-            cache[cache_key] = {"data": lb_data, "last_fetch": now, "next_fetch_allowed": next_fetch, "mode": "backup", "full_data": backup_data}
-            return lb_data, next_fetch, now, backup_data, "💾 Supabase DB Backup (API Offline)"
-            
-    next_fetch = now + datetime.timedelta(minutes=5)
-    cache[cache_key] = {"data": [], "last_fetch": now, "next_fetch_allowed": next_fetch, "mode": "offline", "full_data": {}}
-    return [], next_fetch, now, {}, "❌ No Data Available"
-
-def render_roster_table(picks, p_info_lower, rounds_active, counting_map, is_live_active, round_scores, round_ranks, is_elim, current_r, hide_rank=False):
-    rows = []
-    for p in picks:
-        p_key = str(p).lower()
-        safe_p = html.escape(str(p))
-        if p_key not in p_info_lower:
-            rows.append(f"<tr><td style='padding-bottom: 5px;'>⚠️ {safe_p}</td><td colspan='{len(rounds_active)+1}' style='color:red;'>Not in Field</td></tr>")
-            continue
-        d = p_info_lower[p_key]; stt = d['status']
-        row_html = f"<tr><td style='padding-right:15px; min-width:140px; padding-bottom: 5px;'>{safe_p}</td>"
-        for r in rounds_active:
-            s = d['rounds'].get(r, None); is_cnt = p_key in counting_map.get(r, [])
-            if s is None and stt in ['cut', 'wd', 'dq']: val = f"<span style='color:#e74c3c;'>{stt.upper()}</span>"
-            elif s is None: val = "<span style='color:#7f8c8d;'>-</span>"
-            else: 
-                txt = format_score(s)
-                if is_live_active and r == current_r and stt == 'active':
-                    hp = d.get('holes_played', 0)
-                    if 0 < hp < 18:
-                        txt = f"{txt} <small>({hp})</small>"
-                        
-                if s < 0: 
-                    score_color = "#e74c3c"
-                    bg_color = "rgba(231, 76, 60, 0.15)"
-                elif s == 0: 
-                    score_color = "#2ecc71"
-                    bg_color = "rgba(46, 204, 113, 0.15)"
-                else: 
-                    score_color = "var(--text-color)"
-                    bg_color = "rgba(130, 130, 130, 0.15)"
-                
-                if is_cnt:
-                    val = f"<span style='color: {score_color}; background-color: {bg_color}; padding: 2px 6px; border-radius: 6px; font-weight: bold;'>{txt}</span>"
-                else:
-                    val = f"<span style='color: {score_color}; opacity: 0.45;'>{txt}</span>"
-                    
-            row_html += f"<td style='padding: 0 10px; padding-bottom: 5px;'>R{r}: {val}</td>"
-        
-        if stt not in ['cut', 'wd', 'dq']:
-            if d['total'] < 0: tot_col = "#e74c3c"
-            elif d['total'] == 0: tot_col = "#2ecc71"
-            else: tot_col = "var(--text-color)"
-            row_html += f"<td style='padding: 0 10px; padding-bottom: 5px; white-space: nowrap;'><b>TOT: <span style='color:{tot_col if current_r > 0 else '#7f8c8d'};'>{format_score(d['total']) if current_r > 0 else '-'}</span></b></td>"
-        else: 
-            row_html += f"<td style='padding: 0 10px; padding-bottom: 5px; white-space: nowrap;'><b>TOT: <span style='color:#e74c3c;'>{stt.upper()}</span></b></td>"
-            
-        row_html += "</tr>"; rows.append(row_html)
-        
-    tot_html = "<tr><td style='padding-right:15px; border-top: 1px solid var(--border-color); padding-top: 8px;'><b>TOTAL (POS)</b></td>"
-    for r in rounds_active:
-        if is_elim and r >= 3: tot_html += f"<td style='padding: 0 10px; border-top: 1px solid var(--border-color); padding-top: 8px;'><b style='color:red;'>CUT</b></td>"
-        else:
-            r_score = round_scores.get(r, 0)
-            if r_score < 0: r_col = "#e74c3c"
-            elif r_score == 0: r_col = "#2ecc71"
-            else: r_col = "var(--text-color)"
-            
-            s_txt = f"<span style='color: {r_col};'>{format_score(r_score)}</span>" if current_r > 0 else "-"
-            rank_display = round_ranks.get(r, '-') if (current_r > 0 and not hide_rank) else '-'
-            tot_html += f"<td style='padding: 0 10px; border-top: 1px solid var(--border-color); padding-top: 8px;'><b>{s_txt}</b> <small>({rank_display})</small></td>"
-            
-    tot_html += "<td></td></tr>"; rows.append(tot_html)
-    return f"<div style='overflow-x: auto;'><table style='width:100%; border-collapse:collapse; font-family:monospace; font-size: 0.95em;'>{''.join(rows)}</table></div>"
-
-def get_clean_entries(t_id, public_mode, valid_players=[], dns_players=[], email_filter=None):
-    if not t_id: return pd.DataFrame(), 0
-    try:
-        df = get_raw_sheet_data(t_id)
-        if df.empty or len(df.columns) < 2: return pd.DataFrame(), 0
-        total_entries = len(df)
-        
-        if email_filter:
-            if 'Email' in df.columns: df = df[df['Email'].astype(str).str.lower().str.strip() == email_filter.lower().strip()].copy()
-            else: return pd.DataFrame(), total_entries
-
-        name_col = 'Name'
-        df['_Original_Name'] = df[name_col]
-        df['_name_lower'] = df[name_col].astype(str).str.lower().str.strip()
-        df = df.sort_values('Sheet_Row')
-        df['_total_entries'] = df.groupby('_name_lower')['_name_lower'].transform('count')
-        df['_entry_num'] = df.groupby('_name_lower').cumcount() + 1
-        
-        def format_admin_name(r):
-            base = str(r['_Original_Name']).strip()
-            return f"{base} (Team {r['_entry_num']})" if r['_total_entries'] > 1 else base
-            
-        df[name_col] = df.apply(format_admin_name, axis=1)
-        df = df.drop(columns=['_name_lower', '_entry_num', '_total_entries'])
-
-        if valid_players or dns_players:
-            stt = []; v_low = [p.strip().lower() for p in valid_players]; d_low = [p.strip().lower() for p in dns_players]
-            pick_cols = ['Pick 1', 'Pick 2', 'Pick 3', 'Pick 4', 'Pick 5']
-
-            for _, row in df.iterrows():
-                inv = []; wrn = []
-                for col in pick_cols:
-                    if col in df.columns:
-                        p = str(row[col]).split(" (Top 20")[0].strip()
-                        if p and p.lower() != 'nan':
-                            l = p.lower()
-                            if l in d_low: wrn.append(p)
-                            elif l not in v_low: inv.append(p)
-                msgs = []
-                if inv: msgs.append(f"❌ {', '.join(inv)} not in field")
-                if wrn: msgs.append(f"⚠️ {', '.join(wrn)} DNS")
-                stt.append("✅ All Valid" if not msgs else " | ".join(msgs))
-            df.insert(df.columns.get_loc(name_col)+1, "Field Status", stt)
-        
-        desired_order = [name_col, 'Email', 'Payment Method', 'Paid']
-        if "Field Status" in df.columns: desired_order.append("Field Status")
-        desired_order.append('Tie Breaker')
-        desired_order.extend(['Pick 1', 'Pick 2', 'Pick 3', 'Pick 4', 'Pick 5'])
-        
-        remaining_cols = [c for c in df.columns if c not in desired_order]
-        df = df[desired_order + remaining_cols]
-        
-        df['_sort_name'] = df[name_col].astype(str).str.lower()
-        if "Field Status" in df.columns:
-            df['_has_error'] = df['Field Status'].apply(lambda x: 0 if str(x).strip().startswith("✅") else 1)
-            df = df.sort_values(by=['_has_error', '_sort_name'], ascending=[False, True]).drop(columns=['_has_error', '_sort_name'])
-        else:
-            df = df.sort_values(by=['_sort_name'], ascending=[True]).drop(columns=['_sort_name'])
-        df.index = range(1, len(df) + 1)
-        return df, total_entries
-    except Exception as e: return pd.DataFrame(), 0
-
-def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", valid_players=None, logo_url=None, is_admin_download=False, header_only=False, is_admin_view=False, hide_title=False, search_query=""):
-    try:
-        lb_data, next_f, last_f, full_data, data_source = fetch_smart_leaderboard(t_id)
-        
-        raw_results = full_data.get('results') or {}
-        tourney_data = raw_results.get('tournament') or {}
-        live_details = tourney_data.get('live_details') or {}
-        
-        t_status = str(live_details.get('status', '')).lower()
-        
-        api_curr_r = safe_int(live_details.get('current_round', 0))
-        player_curr_r = max([safe_int(p.get('current_round', 0)) for p in lb_data] + [0])
-        current_r = max(api_curr_r, player_curr_r)
-            
-        active_field = [p for p in lb_data if p.get('status','').lower() == 'active']
-        not_started_current = [p for p in lb_data if p.get('status','').lower() in ['not started', 'notstarted'] and safe_int(p.get('current_round', 0)) == current_r]
-        total_holes_live = sum(safe_int(p.get('holes_played', 0)) for p in lb_data)
-        
-        if t_status in ['completed', 'complete', 'endofday']:
-            is_round_finished_consensus = True
-        elif active_field and all(safe_int(p.get('holes_played', 0)) == 18 for p in active_field):
-            is_round_finished_consensus = True
-        elif t_status == 'inprogress' and not active_field and not not_started_current:
-            is_round_finished_consensus = True
-        elif t_status == 'inprogress' and total_holes_live == 0:
-            is_round_finished_consensus = True
-        else:
-            is_round_finished_consensus = False
-            
-        active_holes = [safe_int(p.get('holes_played', 0)) for p in active_field]
-        
-        last_group_teed_off = False
-        last_group_htr = 0
-        is_r4_fully_done = False
-        
-        if not active_holes:
-            if any(p.get('status', '').lower() in ['complete', 'completed'] for p in lb_data):
-                last_group_teed_off = True
-                last_group_htr = 18
-                if current_r == 4: is_r4_fully_done = True
-            else:
-                last_group_teed_off = False
-        else:
-            min_hp = min(active_holes)
-            if min_hp == 0: 
-                last_group_teed_off = False
-                last_group_htr = 0
-            else:
-                last_group_htr = min_hp
-                last_group_teed_off = True
-
-        cache = get_api_cache()
-        lb_key = f"lb_{t_id}"
-        cache_mode = cache[lb_key].get("mode", "") if lb_key in cache else ""
-        is_r4_live_mode = "R4 Live Scoring" in cache_mode
-
-        if is_admin_view:
-            sweep_max_round = current_r
-        else:
-            if current_r == 4:
-                if is_r4_live_mode or last_group_teed_off: sweep_max_round = 4
-                else: sweep_max_round = 3
-            elif is_round_finished_consensus: sweep_max_round = current_r
-            else: sweep_max_round = current_r - 1
-            
-        p_info = {}
-        status_map = {'withdrawn': 'wd', 'disqualified': 'dq', 'missed cut': 'cut', 'mc': 'cut'}
-        dns_list = [n.strip().lower() for n in str(dns_input).split(",")] if dns_input else []
-
-        for p in lb_data:
-            name = f"{p['first_name']} {p['last_name']}".strip()
-            name_lower = name.lower()
-            raw_status = p.get('status', '').lower()
-            norm_status = status_map.get(raw_status, raw_status)
-            final_status = 'wd' if name_lower in dns_list else norm_status
-            
-            try: strokes = [safe_int(rd.get('strokes', 0)) for rd in p.get('rounds', [])]
-            except Exception: strokes = [0]*4
-                
-            rds = {}
-            if final_status not in ['wd', 'dq']:
-                for i, rd in enumerate(p.get('rounds', [])):
-                    r_num = rd.get('round_number')
-                    if not r_num or r_num > sweep_max_round: continue 
-                    s = strokes[i]
-                    if s > 0: rds[r_num] = (s - par_override) if (par_override > 0 and s > 40) else safe_int(rd.get('total_to_par', 0))
-                
-                if final_status == 'active' and sweep_max_round == current_r:
-                    hp = safe_int(p.get('holes_played', 0))
-                    api_total = safe_int(p.get('total_to_par', 0))
-                    api_past_total = get_corrected_past_total(p, current_r, par_override)
-                    
-                    has_started = (hp > 0) or (api_total != api_past_total)
-                    if has_started:
-                        rds[current_r] = api_total - api_past_total
-                        
-            if final_status in ['wd', 'dq']: final_total = 999
-            elif final_status in ['missed cut', 'cut']: final_total = safe_int(p.get('total_to_par', 0))
-            else:
-                if sweep_max_round == current_r and final_status == 'active':
-                    api_total = safe_int(p.get('total_to_par', 0))
-                    if par_override > 0:
-                        api_past_total = get_corrected_past_total(p, current_r, par_override)
-                        final_total = sum([rds.get(x, 0) for x in range(1, current_r)]) + (api_total - api_past_total)
-                    else: final_total = api_total
-                else: final_total = sum(rds.values())
-                
-            p_info[name] = {'status': final_status, 'rounds': rds, 'total': final_total, 'holes_played': safe_int(p.get('holes_played', 0))}
-            
-        if dns_input:
-            for dns_name in str(dns_input).split(","):
-                clean_dns = dns_name.strip()
-                if not clean_dns: continue
-                if clean_dns not in p_info: p_info[clean_dns] = {'status': 'wd', 'rounds': {}, 'total': 999, 'holes_played': 0}
-        
-        p_info_lower = {k.lower(): v for k, v in p_info.items()}
-        
-        alias_str = fetch_aliases_from_sheet(t_id)
-        if alias_str:
-            for pair in alias_str.split(','):
-                if ':' in pair:
-                    wrong, correct = pair.split(':')
-                    wrong, correct = wrong.strip().lower(), correct.strip().lower()
-                    if correct in p_info_lower:
-                        p_info_lower[wrong] = p_info_lower[correct]
-            
-        if current_r == 0 or t_status == 'pre' or t_status == '':
-            for vp in (valid_players or []):
-                if vp.lower() not in p_info_lower: p_info_lower[vp.lower()] = {'status': 'active', 'rounds': {}, 'total': 0, 'holes_played': 0}
-        
-        # 🚨 THE FIX: Calculate the winning score based strictly on the LIVE leaderboard
-        win_score = 0
-        live_win_scores = [safe_int(p.get('total_to_par', 0)) for p in lb_data if str(p.get('status', '')).lower() not in ['withdrawn', 'wd', 'disqualified', 'dq']]
-        if live_win_scores: 
-            win_score = min(live_win_scores)
-            
-        if t_status not in ['completed', 'endofday', 'pre', '']:
-            if is_round_finished_consensus: t_status = 'completed' if current_r == 4 else 'endofday'
-            
-        hide_rank = (t_status == 'pre' or current_r == 0 or t_status == '') or (current_r == 1 and t_status not in ['endofday', 'completed'])
-        
-        if t_status == 'completed' or (current_r == 4 and (is_r4_fully_done or last_group_htr >= 18)):
-            if t_status == 'completed':
-                status_txt = f"Tournament Finished | Winning Score: {format_score(win_score)}"
-            else:
-                status_txt = "All players finished: Final Result Being Checked!"
-        elif t_status in ['pre', '']:
-            status_txt = f"Waiting for R1 to start... ⏳ ({datetime.datetime.strptime(str(t_start), '%Y-%m-%d %H:%M:%S').strftime('%d %b %y')})" if t_start else "Waiting for R1 to start... ⏳"
-        elif t_status == 'suspended':
-            status_txt = f"Play Suspended (R{current_r})"
-        elif t_status == 'endofday':
-            status_txt = f"R{current_r} Completed"
-        else: 
-            if current_r == 4:
-                if not last_group_teed_off: status_txt = "R4 In-Play | Live scoring will begin once all players tee off"
-                else: status_txt = f"R4 In-Play | Leader: {format_score(win_score)} | Last Group Thru: {last_group_htr}"
-            else: status_txt = f"R{current_r} In-Play"
-            
-        if not is_admin_download:
-            if logo_url:
-                try:
-                    st.markdown(f"<div style='text-align: center; padding-bottom: 10px;'><img src='{html.escape(logo_url)}' style='max-width: 250px; max-height: 150px; width: 100%; object-fit: contain;'></div>", unsafe_allow_html=True)
-                except Exception: pass
-            elif not hide_title:
-                st.header(f"🏆 {html.escape(t_name.split('(')[0])}")
-
-            if t_status not in ['pre', ''] and current_r > 0:
-                if t_status == 'completed':
-                    status_bar_html = f"<div class='compact-container' style='display: flex; justify-content: center; align-items: center; padding: 12px;'><div style='font-weight: bold; font-size: 1.15em; color: #2ecc71;'>🏆 {html.escape(status_txt)}</div></div>"
-                    st.markdown(status_bar_html, unsafe_allow_html=True)
-                else:
-                    last_ts = int(last_f.timestamp() * 1000) if last_f else 0
-                    next_ts = int(next_f.timestamp() * 1000) if next_f else 0
-
-                    status_html = f"""
-                    <!DOCTYPE html>
-                    <html>
-                    <head>
-                    <style>
-                        body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: transparent; padding: 2px; }}
-                        .box {{ text-align: center; border-radius: 6px; padding: 10px; border: 1px solid rgba(130, 130, 130, 0.4); background-color: #f8f9fa; color: #2c3e50; }}
-                        @media (prefers-color-scheme: dark) {{
-                            .box {{ background-color: #262730; color: #FAFAFA; border-color: rgba(255, 255, 255, 0.2); }}
-                        }}
-                        .title {{ font-weight: bold; font-size: 1.05em; }}
-                        .row {{ display: flex; flex-wrap: wrap; justify-content: center; gap: 15px; margin-top: 6px; font-size: 0.95em; }}
-                    </style>
-                    </head>
-                    <body>
-                        <div class="box">
-                            <div class="title">⛳ {html.escape(status_txt)}</div>
-                            <div class="row">
-                                <span>🕒 <b>Last Check:</b> <span id="t-last">...</span></span>
-                                <span>⏳ <b>Next Check:</b> <span id="t-next">...</span></span>
-                            </div>
-                        </div>
-                        <script>
-                            function fmt(ts) {{
-                                if (!ts) return "Unknown";
-                                return new Date(ts).toLocaleString([], {{ weekday: "short", hour: "numeric", minute: "2-digit", hour12: true, timeZoneName: "short" }});
-                            }}
-                            document.getElementById("t-last").innerText = fmt({last_ts});
-                            document.getElementById("t-next").innerText = fmt({next_ts});
-                        </script>
-                    </body>
-                    </html>
-                    """
-                    st.iframe(status_html, height=85)
-                
-        if header_only: return
-
-        if not t_id: return pd.DataFrame() if is_admin_download else None
-            
-        df_resp = get_raw_sheet_data(t_id)
-        if df_resp.empty or len(df_resp.columns) < 2: 
-            if is_admin_download: return pd.DataFrame()
-            st.info("No entries have been submitted yet."); return None
-        
-        name_col = 'Name'
-        df_resp['_name_lower'] = df_resp[name_col].astype(str).str.lower().str.strip()
-        df_resp['_total_entries'] = df_resp.groupby('_name_lower')['_name_lower'].transform('count')
-        df_resp['_entry_num'] = df_resp.groupby('_name_lower').cumcount() + 1
-        
-        def make_display_name(r):
-            base = html.escape(str(r[name_col]).strip())
-            if r['_total_entries'] > 1:
-                return f"{base} <span style='font-size: 0.75em; background-color: rgba(130, 130, 130, 0.25); padding: 2px 6px; border-radius: 10px; margin-left: 6px; font-weight: normal; vertical-align: middle;'>Team {r['_entry_num']}</span>"
-            return base
-
-        def make_export_name(r):
-            base = str(r[name_col]).strip()
-            return f"{base} (Team {r['_entry_num']})" if r['_total_entries'] > 1 else base
-            
-        df_resp['_Display_Name'] = df_resp.apply(make_display_name, axis=1)
-        df_resp[name_col] = df_resp.apply(make_export_name, axis=1)
-        
-        pick_cols = ['Pick 1', 'Pick 2', 'Pick 3', 'Pick 4', 'Pick 5']
-        r_range = list(range(1, sweep_max_round + 1)) if sweep_max_round > 0 else [1]
-        
-        results = []
-        for _, row in df_resp.iterrows():
-            picks = [str(row[c]).split(" (Top 20")[0].strip() for c in pick_cols if c in df_resp.columns][:5]
-            sheet_warns = []
-            
-            total = 0; c_map = {}; r_sc = {}; cum_sc = {}; running = 0
-            for r in r_range:
-                p_scores = []
-                for p in picks:
-                    p_key = p.lower()
-                    if p_key in p_info_lower:
-                        if r in p_info_lower[p_key]['rounds']: score = p_info_lower[p_key]['rounds'][r]
-                        elif p_info_lower[p_key]['status'] in ['cut', 'wd', 'dq']: score = 99
-                        else: score = 0 
-                    else: score = 99
-                    p_scores.append((p_key, score))
-                
-                p_scores.sort(key=lambda x: int(x[1]))
-                top_4 = p_scores[:4]; c_map[r] = [x[0] for x in top_4]
-                r_sum = sum(int(x[1]) for x in top_4)
-                r_sc[r] = r_sum; running += r_sum; cum_sc[r] = running; total += r_sum
-                
-            cut_made = (current_r > 2) or (current_r == 2 and is_round_finished_consensus)
-            elim = (cut_made and sum(1 for p in picks if p.lower() in p_info_lower and p_info_lower[p.lower()]['status'] not in ['cut','wd','dq']) < 4)
-            
-            t_val = extract_tie_breaker(row['Tie Breaker']) if 'Tie Breaker' in row else 0
-            
-            results.append({"Participant": str(row[name_col]), "DisplayName": str(row['_Display_Name']), "Total": total, "Elim": elim, "Picks": picks, "CMap": c_map, "RSc": r_sc, "Cum": cum_sc, "Diff": abs(t_val - win_score), "Tie": t_val, "SheetWarnings": sheet_warns})
-
-        if not results:
-            if is_admin_download: return pd.DataFrame()
-            st.info("No entries have been submitted yet."); return None
-
-        df = pd.DataFrame(results)
-        if hide_rank:
-            df = df.sort_values(by="Participant", key=lambda x: x.astype(str).str.lower()).reset_index(drop=True)
-            df['DRank'] = "-"
-        else:
-            df = df.sort_values(by=["Elim", "Total", "Diff", "Participant"], ascending=[True, True, True, True]).reset_index(drop=True)
-            dr = []; cr = 1
-            for i in range(len(df)):
-                if i > 0 and df.iloc[i]['Elim'] == df.iloc[i-1]['Elim'] and df.iloc[i]['Total'] == df.iloc[i-1]['Total'] and df.iloc[i]['Diff'] == df.iloc[i-1]['Diff']:
-                    dr.append(f"T{cr}")
-                    if not str(dr[i-1]).startswith("T"): dr[i-1] = f"T{cr}"
-                else: cr = i + 1; dr.append(str(cr))
-            df['DRank'] = dr
-
-        history_ranks = {idx: {} for idx in df.index}
-        for r in r_range:
-            sorted_indices = sorted(df.index, key=lambda x: df.loc[x, 'Cum'].get(r, 9999))
-            rank_start = 1
-            for k, idx in enumerate(sorted_indices):
-                score = df.loc[idx, 'Cum'].get(r, 9999)
-                if k > 0 and score == df.loc[sorted_indices[k-1], 'Cum'].get(r, 9999):
-                    r_str = f"T{rank_start}"
-                    prev_idx = sorted_indices[k-1]
-                    if not history_ranks[prev_idx].get(r, "").startswith("T"): history_ranks[prev_idx][r] = f"T{rank_start}"
-                else: rank_start = k + 1; r_str = str(rank_start)
-                history_ranks[idx][r] = r_str
-
-        if is_admin_download: return df 
-        
-        if t_status == 'completed' and not is_admin_view and not header_only:
-            if not st.session_state.get(f"balloons_{t_id}"):
-                st.balloons(); st.session_state[f"balloons_{t_id}"] = True
-                
-            settings_cache = get_settings_cache()
-            conf = settings_cache.get(f"payout_confirmed_{t_id}", False)
-            
-            prize_pool = [
-                float(settings_cache.get(f"payout_1_{t_id}") or 0),
-                float(settings_cache.get(f"payout_2_{t_id}") or 0),
-                float(settings_cache.get(f"payout_3_{t_id}") or 0)
-            ]
-            
-            if not df.empty:
-                podium_players = []
-                current_prizes_used = 0
-                grouped_ranks = {}
-                
-                for _, row in df.iterrows():
-                    r_str = str(row.get('DRank', '-'))
-                    if r_str == '-': continue
-                    if r_str not in grouped_ranks: grouped_ranks[r_str] = []
-                    grouped_ranks[r_str].append({
-                        "name": html.escape(str(row['Participant'])),
-                        "score": format_score(row['Total']),
-                        "tie": row['Tie']
-                    })
-                
-                for r_str, players in grouped_ranks.items():
-                    match = re.search(r'\d+', r_str)
-                    if not match: continue
-                    base_r = int(match.group())
-                    
-                    if current_prizes_used >= 3: break 
-                        
-                    n_players = len(players)
-                    prizes_to_take = min(n_players, 3 - current_prizes_used)
-                    
-                    total_cash = 0
-                    for _ in range(prizes_to_take):
-                        total_cash += prize_pool[current_prizes_used]
-                        current_prizes_used += 1
-                        
-                    payout = total_cash / n_players if n_players > 0 else 0
-                    
-                    for p_data in players:
-                        podium_players.append({
-                            "name": p_data['name'], 
-                            "rank": base_r, 
-                            "payout": payout,
-                            "score": p_data['score'],
-                            "tie": p_data['tie']
-                        })
-                
-                r1_players = [p for p in podium_players if p['rank'] == 1]
-                r2_players = [p for p in podium_players if p['rank'] == 2]
-                r3_players = [p for p in podium_players if p['rank'] == 3]
-                
-                display_order = r2_players + r1_players + r3_players
-                    
-                podium_styles = {
-                    1: {"medal": "🥇", "bg": "linear-gradient(145deg, #fffbeb, #fef08a)", "border": "#fde047", "padding": "25px 10px 15px", "sz": "2.8em", "z": "3", "shadow": "box-shadow: 0 -4px 10px rgba(0,0,0,0.1);", "mw": "160px"},
-                    2: {"medal": "🥈", "bg": "linear-gradient(145deg, #f8f9fa, #e2e8f0)", "border": "#cbd5e1", "padding": "15px 10px", "sz": "2.2em", "z": "2", "shadow": "", "mw": "140px"},
-                    3: {"medal": "🥉", "bg": "linear-gradient(145deg, #fff7ed, #ffedd5)", "border": "#fed7aa", "padding": "10px", "sz": "1.8em", "z": "1", "shadow": "", "mw": "140px"}
-                }
-                
-                html_blocks = []
-                for p in display_order:
-                    s = podium_styles.get(p['rank'], podium_styles[3]) 
-                    pz_str = ""
-                    if conf and p['payout'] > 0:
-                        cash_str = f"{p['payout']:,.2f}".replace(".00", "") 
-                        pz_str = f"<br><span style='color:#27ae60; font-size:1.1em;'><b>${cash_str}</b></span>"
-                        
-                    score_str = f"<div style='font-size: 0.9em; margin-top: 4px;'><b style='color: #2ecc71;'>{p['score']}</b> <span style='color: #475569; opacity: 0.8;'>({p['tie']})</span></div>"
-                        
-                    block = f"<div style='flex: 1; max-width: {s['mw']}; background: {s['bg']}; border-radius: 8px 8px 0 0; padding: {s['padding']}; margin: 0 4px; border: 1px solid {s['border']}; border-bottom: none; position: relative; z-index: {s['z']}; {s['shadow']}'><div style='font-size: {s['sz']}; margin-bottom: 5px;'>{s['medal']}</div><div style='font-size: 0.9em; font-weight: bold; color: #475569; word-wrap: break-word;'>{p['name']}</div>{score_str}{pz_str}</div>"
-                    html_blocks.append(block)
-                
-                final_html = "<div style='display: flex; justify-content: center; align-items: flex-end; margin: 20px 0 0px 0; text-align: center; font-family: sans-serif;'>" + "".join(html_blocks) + "</div><div style='height: 4px; background-color: #2c3e50; margin-bottom: 30px; border-radius: 2px;'></div>"
-                
-                st.markdown(final_html, unsafe_allow_html=True)
-        
-        if search_query:
-            df = df[df['Participant'].str.contains(search_query, case=False, na=False)]
-            if df.empty:
-                st.warning("🔍 No entries found matching your search.")
-        
-        is_live_active_now = (sweep_max_round == current_r and t_status in ['inprogress', 'active'])
-
-        max_name_len = max([len(str(n)) for n in df['Participant']]) if not df.empty else 15
-        name_min_width = max(max_name_len * 8, 110) 
-
-        leaderboard_html = "<div style='display: flex; flex-direction: column; gap: 4px; overflow-x: auto;'>"
-
-        if not hide_rank:
-            legend_html = f"<div style='display: grid; grid-template-columns: 34px 40px {name_min_width}px 80px auto; gap: 8px; width: max-content; font-size: 0.85em; color: var(--text-color); opacity: 0.7; margin-bottom: 2px;'><div></div><div></div><div></div><div style='white-space: nowrap;'>🏌️‍♂️ Score (Tie)</div><div></div></div>"
-            leaderboard_html += legend_html
-        
-        for i, row in df.iterrows():
-            d = row['DRank']
-            
-            if hide_rank: lbl_val = "-"
-            elif t_status == 'completed': lbl_val = "🥇" if d in ["1","T1"] else "🥈" if d in ["2","T2"] else "🥉" if d in ["3","T3"] else f"#{d}"
-            else: lbl_val = f"#{d}"
-            
-            score_txt = format_score(row['Total']) if not hide_rank else "-"
-            warn_list = []
-            vp_lower = [v.lower() for v in valid_players] if valid_players else []
-            api_data_loaded = len(p_info_lower) > 0
-            
-            for p in row['Picks']:
-                p_key = p.lower()
-                if not api_data_loaded: pass 
-                elif p_key not in p_info_lower: warn_list.append(f"Invalid Pick: {html.escape(p)}")
-                elif vp_lower and p_key not in vp_lower:
-                    if p_info_lower[p_key]['status'] not in ['cut', 'wd', 'dq']: warn_list.append(f"Possible WD/DNS: {html.escape(p)}")
-            
-            for w in row['SheetWarnings']: warn_list.append(html.escape(str(w)))
-            warn_list = list(dict.fromkeys(warn_list))
-            
-            if row['Elim']: 
-                score_block = "<div style='color: #e74c3c; font-weight: bold; white-space: nowrap;'>❌ CUT</div>"
-            else: 
-                score_color = '#2ecc71' 
-                score_block = f"<div style='white-space: nowrap;'><b style='color: {score_color};'>{score_txt}</b> <span style='color: var(--text-color); opacity: 0.6; font-size: 0.9em;'>({row['Tie']})</span></div>"
-                
-            warn_html = f"<div style='color: #e67e22; font-size: 0.85em; white-space: nowrap;'>⚠️ {' | '.join(warn_list)}</div>" if warn_list else "<div></div>"
-            
-            table_html = render_roster_table(row['Picks'], p_info_lower, r_range, row['CMap'], is_live_active_now, row['RSc'], history_ranks[i], row['Elim'], current_r, hide_rank)
-            
-            summary_html = f"<div style='display: grid; grid-template-columns: 40px {name_min_width}px 80px auto; gap: 8px; align-items: center; width: max-content;'><div style='font-weight: bold;'>{lbl_val}</div><div style='font-weight: bold; white-space: nowrap;'>{row['DisplayName']}</div>{score_block}{warn_html}</div>"
-            
-            leaderboard_html += f"<details><summary>{summary_html}</summary><div class='expanded-content'>{table_html}</div></details>"
-            
-        leaderboard_html += "</div>"
-        
-        st.markdown(leaderboard_html, unsafe_allow_html=True)
-        
-    except Exception as e: 
-        st.error(f"Error calculating leaderboard: {e}")
-        return pd.DataFrame() if is_admin_download else None
-
-def render_pga_leaderboard(lb_data, full_data, tourney_id, view_mode, par_override=0, hide_tt=False):
-    if not lb_data: st.info("No tournament data available yet."); return
-
-    raw_results = full_data.get('results') or {} if full_data else {}
-    tourney_data = raw_results.get('tournament') or {}
-    live_details = tourney_data.get('live_details') or {}
-    tourney_tz_str = tourney_data.get('timezone') or 'America/New_York'
-    
-    api_curr_r = safe_int(live_details.get('current_round', 0))
-    player_curr_r = max([safe_int(p.get('current_round', 0)) for p in lb_data] + [0])
-    curr_r = max(api_curr_r, player_curr_r)
-    global_status = live_details.get('status', '').lower()
-    
-    tz_choice = st.radio("Display Tee Times in:", ["🇬🇧 UK Time", "🇺🇸 US Eastern (ET)"], horizontal=True, key=f"tz_{tourney_id}_{view_mode}")
-    target_tz = 'Europe/London' if "UK" in tz_choice else 'America/New_York'
-
-    active_field = [p for p in lb_data if p.get('status','').lower() == 'active']
-    not_started_current = [p for p in lb_data if p.get('status','').lower() in ['not started', 'notstarted'] and safe_int(p.get('current_round', 0)) == curr_r]
-    total_holes_live = sum(safe_int(p.get('holes_played', 0)) for p in lb_data)
-    
-    if global_status in ['completed', 'complete']: completed_rounds = 4
-    elif global_status == 'endofday': completed_rounds = curr_r
-    else:
-        if active_field and all(safe_int(p.get('holes_played',0)) == 18 for p in active_field): 
-            completed_rounds = curr_r
-        elif global_status == 'inprogress' and not active_field and not not_started_current:
-            completed_rounds = curr_r
-        elif global_status == 'inprogress' and total_holes_live == 0:
-            completed_rounds = curr_r
-        else: 
-            completed_rounds = curr_r - 1
-            
-    cache = get_api_cache()
-    lb_key = f"lb_{tourney_id}"
-    is_r4_live = (lb_key in cache and "R4 Live" in cache[lb_key].get("mode", ""))
-    
-    if view_mode == "admin":
-        max_visible_round = curr_r
-        is_live_scoring_active = (global_status in ['inprogress', 'active'])
-    else:
-        if is_r4_live and curr_r == 4:
-            max_visible_round = 4
-            is_live_scoring_active = True
-        else:
-            max_visible_round = completed_rounds
-            is_live_scoring_active = False
-
-    if completed_rounds == 4 or is_live_scoring_active: thru_header = "Thru"
-    else: thru_header = f"R{completed_rounds + 1} Tee Times"
-
-    real_df = pd.DataFrame([{
-        'Pos': str(p.get('position', '-')), 
-        'Status': str(p.get('status', '')).lower(),
-        'Player': f"{p.get('first_name', '')} {p.get('last_name', '')}".strip(),
-        'Total': get_pga_total_num(p, max_visible_round, par_override, is_live_scoring_active, curr_r),
-        'Thru': get_pga_thru(p, curr_r, completed_rounds, is_live_scoring_active, tourney_tz_str, target_tz, hide_tt),
-        'R1': format_pga_round_score(p, 0, max_visible_round, par_override, is_live_scoring_active, curr_r),
-        'R2': format_pga_round_score(p, 1, max_visible_round, par_override, is_live_scoring_active, curr_r),
-        'R3': format_pga_round_score(p, 2, max_visible_round, par_override, is_live_scoring_active, curr_r),
-        'R4': format_pga_round_score(p, 3, max_visible_round, par_override, is_live_scoring_active, curr_r)
-    } for p in lb_data])
-    
-    if not is_live_scoring_active:
-        real_df['Sort_Status'] = real_df['Status'].apply(lambda x: 1 if x in ['withdrawn', 'missed cut', 'disqualified', 'wd', 'cut', 'dq'] else 0)
-        real_df = real_df.sort_values(by=['Sort_Status', 'Total', 'Player']).reset_index(drop=True)
-        ranks = []; crank = 1
-        for i in range(len(real_df)):
-            score, status = real_df.loc[i, 'Total'], real_df.loc[i, 'Status']
-            if status in ['withdrawn', 'wd']: ranks.append("WD")
-            elif status in ['missed cut', 'cut']: ranks.append("CUT")
-            elif status in ['disqualified', 'dq']: ranks.append("DQ")
-            elif score == 999: ranks.append("-")
-            else:
-                if i > 0 and real_df.loc[i, 'Total'] == real_df.loc[i-1, 'Total'] and real_df.loc[i, 'Sort_Status'] == 0:
-                    ranks.append(f"T{crank}"); ranks[i-1] = f"T{crank}" if not str(ranks[i-1]).startswith("T") else ranks[i-1]
-                else: crank = i + 1; ranks.append(str(crank))
-        real_df['Pos'] = ranks
-    
-    real_df = real_df.drop(columns=['Status', 'Sort_Status'], errors='ignore')
-    st.dataframe(real_df.style.format({'Total': golf_fmt}), width="stretch", hide_index=True, column_config={
-        "Pos": st.column_config.TextColumn("Pos", width="small", pinned=True),
-        "Player": st.column_config.TextColumn("Golfer", width="medium"),
-        "Total": st.column_config.Column("Total", width="small"),
-        "Thru": st.column_config.TextColumn(thru_header, width="medium"),
-        "R1": st.column_config.TextColumn("R1", width="small"),
-        "R2": st.column_config.TextColumn("R2", width="small"),
-        "R3": st.column_config.TextColumn("R3", width="small"),
-        "R4": st.column_config.TextColumn("R4", width="small")
-    })
 
 # --- 5. MAIN UI ---
 settings = get_settings_cache()
@@ -1662,11 +132,11 @@ if is_public:
     if not tid: st.error("No tournament ID."); st.stop()
     st.session_state['current_t_id'] = tid
     
-    current_par_override = fetch_par_from_sheet(tid)
-    current_hide_tt = fetch_hide_tt_from_sheet(tid)
+    current_par_override = fetch_par_from_db(tid)
+    current_hide_tt = fetch_hide_tt_from_db(tid)
 
     try:
-        pconf = json.loads(fetch_payout_config_from_sheet(tid))
+        pconf = json.loads(fetch_payout_config_from_db(tid))
         if "payout_confirmed" in pconf:
             settings[f"payout_confirmed_{tid}"] = pconf.get("payout_confirmed", False)
             settings[f"payout_1_{tid}"] = pconf.get("p1", 0)
@@ -1754,9 +224,9 @@ if is_public:
     
     raw_rules = get_config(tid, 'rules', DEFAULT_RULES)
     rules_text = raw_rules if raw_rules and raw_rules.strip() else DEFAULT_RULES
-    public_dns = fetch_dns_from_sheet(tid)
+    public_dns = fetch_dns_from_db(tid)
     
-    public_logo = fetch_logo_from_sheet(tid)
+    public_logo = fetch_logo_from_db(tid)
     logo_rendered = False
     
     if public_logo:
@@ -1784,7 +254,7 @@ if is_public:
         top20_cached = get_top_20_players()
         formatted_field = get_formatted_field(tid, top20_cached)
     else:
-        backup_str = fetch_field_backup_from_sheet(tid)
+        backup_str = fetch_field_backup_from_db(tid)
         formatted_field = [x.strip() for x in backup_str.split(',')] if backup_str else []
         
     valid_p = [p.split(" (Top 20")[0] for p in formatted_field]
@@ -1960,8 +430,8 @@ if is_public:
                             final_payment = form_payment
                             
                             with st.spinner("Locking in your team..."):
-                                if append_entry_to_sheet(tid, [ts, form_name, form_email, final_payment, form_tie, p1, p2, p3, p4, p5]):
-                                    log_to_sheet("NEW ENTRY", f"Team submitted by {form_name}")
+                                if insert_entry(tid, [ts, form_name, form_email, final_payment, form_tie, p1, p2, p3, p4, p5]):
+                                    log_event("NEW ENTRY", f"Team submitted by {form_name}")
                                     send_confirmation_email(form_email, form_name, clean_picks, form_tie, final_payment, tnm, tid, is_edit=False, close_time_str=close_time_str_email, logo_url=public_logo)
                                     st.session_state[f"success_{tid}"] = True
                                     st.session_state[f"success_email_{tid}"] = form_email
@@ -2023,7 +493,7 @@ if is_public:
                             
                             with st.spinner("Updating your team..."):
                                 if update_specific_entry(tid, row_data['Sheet_Row'], [ts, edit_name, edit_email, final_edit_payment, edit_tie, ep1, ep2, ep3, ep4, ep5]):
-                                    log_to_sheet("ENTRY UPDATED", f"Team updated by {edit_name}")
+                                    log_event("ENTRY UPDATED", f"Team updated by {edit_name}")
                                     send_confirmation_email(edit_email, edit_name, clean_picks, edit_tie, final_edit_payment, tnm, tid, is_edit=True, close_time_str=close_time_str_email, logo_url=public_logo)
                                     st.session_state["editing_row"] = None
                                     st.session_state[f"edit_success_{tid}"] = True
@@ -2249,7 +719,7 @@ else:
             if st.button("📥 Force Refresh Top 20", type="primary"): 
                 get_top_20_players.clear()  
                 get_top_20_players()        
-                log_to_sheet("ADMIN ACTION", "Forced a manual refresh of the OWGR Top 20")
+                log_event("ADMIN ACTION", "Forced a manual refresh of the OWGR Top 20")
                 st.success("✅ Fresh OWGR Top 20 pulled and cached!")
                 time.sleep(1)
                 st.rerun()                  
@@ -2257,11 +727,11 @@ else:
             st.subheader("📋 Supabase Connection")
             st.success("✅ Connected to Supabase!")
             
-            current_par_override = fetch_par_from_sheet(t_id)
-            current_hide_tt = fetch_hide_tt_from_sheet(t_id)
+            current_par_override = fetch_par_from_db(t_id)
+            current_hide_tt = fetch_hide_tt_from_db(t_id)
 
             try:
-                pconf = json.loads(fetch_payout_config_from_sheet(t_id))
+                pconf = json.loads(fetch_payout_config_from_db(t_id))
                 if "payout_confirmed" in pconf:
                     settings[f"payout_confirmed_{t_id}"] = pconf.get("payout_confirmed", False)
                     settings[f"payout_1_{t_id}"] = pconf.get("p1", 0)
@@ -2271,11 +741,11 @@ else:
             except Exception: pass
             
             st.subheader("🖼️ Branding")
-            current_logo = fetch_logo_from_sheet(t_id)
+            current_logo = fetch_logo_from_db(t_id)
             new_logo = st.text_input("Logo URL", value=current_logo)
             
             if new_logo != current_logo:
-                if save_logo_to_sheet(t_id, new_logo):
+                if save_logo_to_db(t_id, new_logo):
                     st.success("✅ Logo permanently saved to Supabase!")
                     st.rerun()
                 else:
@@ -2284,7 +754,7 @@ else:
             if new_logo: st.image(new_logo, width="stretch")
             
             st.subheader("🚑 Smart DNS Manager")
-            current_dns = fetch_dns_from_sheet(t_id)
+            current_dns = fetch_dns_from_db(t_id)
             st.info(f"**Current DNS:** {current_dns if current_dns else 'None'}")
             dns_input = st.text_input("Player Name", placeholder="Jake Knapp or -Jake Knapp")
             if st.button("🔄 Update DNS List", width="stretch") and dns_input:
@@ -2295,7 +765,7 @@ else:
                     st.success(f"Removed {action_name[1:]}")
                 else:
                     if not any(p.lower() == action_name.lower() for p in dns_list): dns_list.append(action_name); st.success(f"Added {action_name}")
-                if save_dns_to_sheet(t_id, ", ".join(dns_list)): st.rerun()
+                if save_dns_to_db(t_id, ", ".join(dns_list)): st.rerun()
                 else: st.error("Failed to save.")
             settings[f"dns_{t_id}"] = current_dns
             
@@ -2309,7 +779,7 @@ else:
             
             new_par = st.number_input("Manual Par Override (e.g. 70, 71, 72)", value=current_par_override)
             if new_par != current_par_override:
-                if save_par_to_sheet(t_id, new_par):
+                if save_par_to_db(t_id, new_par):
                     st.success(f"✅ Par permanently saved as {new_par}!")
                     st.rerun()
                 else:
@@ -2319,7 +789,7 @@ else:
             st.caption("🕒 **Tee Time Visibility**")
             new_hide_tt = st.checkbox("🚫 Hide API Tee Times (Force 'Waiting...')", value=current_hide_tt)
             if new_hide_tt != current_hide_tt:
-                if save_hide_tt_to_sheet(t_id, new_hide_tt):
+                if save_hide_tt_to_db(t_id, new_hide_tt):
                     st.success("✅ Tee Time visibility updated!")
                     st.rerun()
                 else:
@@ -2404,29 +874,29 @@ else:
                 st.query_params["tourney_id"] = str(t_id)
                 st.rerun()
                 
-            saved_short_url = fetch_short_url_from_sheet(t_id)
+            saved_short_url = fetch_short_url_from_db(t_id)
             
             if saved_short_url:
                 st.success("✨ Anonymous Short Link Ready!")
                 st.code(saved_short_url)
                 if st.button("🗑️ Reset Short Link"): 
-                    save_short_url_to_sheet(t_id, "")
+                    save_short_url_to_db(t_id, "")
                     st.rerun()
             else:
                 if st.button("✨ Generate Anonymous Short Link"):
                     with st.spinner("Generating short link..."):
                         short_link = generate_short_link(p_url)
                         if short_link: 
-                            save_short_url_to_sheet(t_id, short_link)
+                            save_short_url_to_db(t_id, short_link)
                             st.success("Created!")
                             st.rerun()
                         else: 
                             st.error("Failed to generate link.")
                             
-            if st.button("🔄 Clear Cache"): get_api_cache().clear(); st.cache_data.clear(); get_raw_sheet_data.clear(); st.rerun()
+            if st.button("🔄 Clear Cache"): get_api_cache().clear(); st.cache_data.clear(); get_entries_df.clear(); st.rerun()
 
     if t_id:
-        admin_logo = fetch_logo_from_sheet(t_id)
+        admin_logo = fetch_logo_from_db(t_id)
         t_name_display = t_key.split('(')[0].strip() if t_key else "Tournament"
         
         # 💥 Updates the browser tab for the Admin view (Safari-proof)
@@ -2464,7 +934,7 @@ else:
         if not is_tournament_started:
             formatted_field_admin = get_formatted_field(t_id, top20_cached_admin)
         else:
-            backup_str = fetch_field_backup_from_sheet(t_id)
+            backup_str = fetch_field_backup_from_db(t_id)
             formatted_field_admin = [x.strip() for x in backup_str.split(',')] if backup_str else []
             
         valid_p = [p.split(" (Top 20")[0] for p in formatted_field_admin]
@@ -2500,7 +970,7 @@ else:
                                 success = True
                                 for idx, row in diffs.iterrows():
                                     if not update_paid_status(t_id, row['Sheet_Row'], row['Paid']): success = False
-                                    else: log_to_sheet("ADMIN ACTION", f"Marked {'Paid' if row['Paid'] else 'Unpaid'} for {row.get('_Original_Name', 'Unknown')}")
+                                    else: log_event("ADMIN ACTION", f"Marked {'Paid' if row['Paid'] else 'Unpaid'} for {row.get('_Original_Name', 'Unknown')}")
                                 if success: st.success("✅ Payment statuses successfully saved to DB! Your financials are locked in.")
                                 else: st.error("🚨 Encountered an error updating some rows.")
                             else: st.info("No changes to save.")
@@ -2526,8 +996,8 @@ else:
                         st.markdown("<br>", unsafe_allow_html=True) 
                         if st.button("💾 Update Method", type="primary", width="stretch"):
                             with st.spinner("Updating DB..."):
-                                if update_single_cell_in_sheet(t_id, target_row['Sheet_Row'], "Payment Method", new_pay):
-                                    log_to_sheet("ADMIN ACTION", f"Changed payment method to '{new_pay}' for {target_name}")
+                                if update_entry_field(t_id, target_row['Sheet_Row'], "Payment Method", new_pay):
+                                    log_event("ADMIN ACTION", f"Changed payment method to '{new_pay}' for {target_name}")
                                     st.toast("✅ Payment updated successfully!")
                                     time.sleep(1); st.rerun() 
                                 else: st.error("🚨 Failed to update.")
@@ -2554,9 +1024,9 @@ else:
                                 actual_pick_headers = ['Pick 1', 'Pick 2', 'Pick 3', 'Pick 4', 'Pick 5']
                                 if len(actual_pick_headers) == 5:
                                     for i in range(5):
-                                        if not update_single_cell_in_sheet(t_id, target_row['Sheet_Row'], actual_pick_headers[i], clean_new_picks[i]): success = False
+                                        if not update_entry_field(t_id, target_row['Sheet_Row'], actual_pick_headers[i], clean_new_picks[i]): success = False
                                     if success:
-                                        log_to_sheet("ADMIN ACTION", f"Manually swapped picks for {target_name}")
+                                        log_event("ADMIN ACTION", f"Manually swapped picks for {target_name}")
                                         st.success("✅ Picks updated successfully!")
                                         time.sleep(1); st.rerun()
                                     else: st.error("🚨 Failed to update some picks.")
@@ -2592,7 +1062,7 @@ else:
                 p_coll = df_fin[df_fin['Payment Method'].str.contains('PayPal', case=False, na=False)]['Collected ($)'].sum()
                 r_coll = df_fin[df_fin['Payment Method'].str.contains('Revolut', case=False, na=False)]['Collected ($)'].sum()
                 
-                saved_bals_str = fetch_fin_balances_from_sheet(t_id)
+                saved_bals_str = fetch_fin_balances_from_db(t_id)
                 try: saved_bals = json.loads(saved_bals_str)
                 except Exception: saved_bals = {}
 
@@ -2621,8 +1091,8 @@ else:
                 if st.button("💾 Save Bank Balances to DB", type="secondary", width="stretch"):
                     new_bals = json.dumps({"z_act": z_actual, "z_per": z_personal, "p_act": p_actual, "p_per": p_personal, "r_act": r_actual, "r_per": r_personal})
                     with st.spinner("Writing balances to DB..."):
-                        if save_fin_balances_to_sheet(t_id, new_bals): 
-                            log_to_sheet("ADMIN ACTION", "Saved Bank Account Reconciliation Balances")
+                        if save_fin_balances_to_db(t_id, new_bals): 
+                            log_event("ADMIN ACTION", "Saved Bank Account Reconciliation Balances")
                             st.success("✅ Balances securely saved! They will permanently survive a refresh.")
                         else: st.error("🚨 Failed to save balances.")
 
@@ -2672,8 +1142,8 @@ else:
                     
                     payout_json = json.dumps({"payout_confirmed": publish_payouts, "p1": final_1, "p2": final_2, "p3": final_3, "pot": total_pot})
                     with st.spinner("Locking payouts to database..."):
-                        if save_payout_config_to_sheet(t_id, payout_json):
-                            log_to_sheet("ADMIN ACTION", f"Updated Payouts (Total Pot: ${total_pot:,.2f})")
+                        if save_payout_config_to_db(t_id, payout_json):
+                            log_event("ADMIN ACTION", f"Updated Payouts (Total Pot: ${total_pot:,.2f})")
                             st.success("Payout configurations safely locked and updated!")
                         else:
                             st.error("🚨 Failed to save payouts.")
@@ -2747,19 +1217,19 @@ else:
                 if st.button("🛠️ Force Rebuild Frozen Field (Fix Top 20 Flags)", type="primary"):
                     with st.spinner("Rebuilding Top 20 database..."): 
                         get_formatted_field(t_id, get_top_20_players())
-                        log_to_sheet("ADMIN ACTION", "Forced rebuild of frozen field and Top 20 flags")
+                        log_event("ADMIN ACTION", "Forced rebuild of frozen field and Top 20 flags")
                     st.success("✅ Database rebuilt and permanently frozen! Please click the 'Clear Cache' button in the sidebar.")
             else:
                 st.subheader("🚨 Smart Field Alerts")
                 st.caption("Detect if players have been added or removed since your last check.")
                 raw_field = get_raw_entry_list(t_id)
                 
-                baseline_str = fetch_alerted_field_from_sheet(t_id)
+                baseline_str = fetch_alerted_field_from_db(t_id)
                 baseline_field = [p.strip() for p in baseline_str.split(",")] if baseline_str else []
                 
                 if not baseline_str and raw_field:
                     if st.button("Set Initial Baseline", type="primary"):
-                        save_alerted_field_to_sheet(t_id, ",".join(raw_field))
+                        save_alerted_field_to_db(t_id, ",".join(raw_field))
                         st.rerun()
                 elif raw_field and baseline_field:
                     added_players = list(set(raw_field) - set(baseline_field))
@@ -2799,7 +1269,7 @@ else:
                                                 alerted_emails.add(user_email)
                                                 time.sleep(1.5)
                                                 
-                                save_alerted_field_to_sheet(t_id, ",".join(raw_field))
+                                save_alerted_field_to_db(t_id, ",".join(raw_field))
                                 st.success(f"✅ Sent {emails_sent} alerts!"); st.rerun()
 
             st.markdown("---")
@@ -2819,7 +1289,7 @@ else:
             st.subheader("🔀 Name Alias Manager")
             st.caption("Link a player's drafted name to their official API leaderboard name to fix 'Not in Field' errors.")
             
-            current_aliases = fetch_aliases_from_sheet(t_id)
+            current_aliases = fetch_aliases_from_db(t_id)
             alias_list = [a.strip() for a in current_aliases.split(",") if a.strip()]
             
             st.markdown("### Current Aliases")
@@ -2832,7 +1302,7 @@ else:
                         with colB:
                             if st.button("❌ Remove", key=f"rm_alias_{idx}"):
                                 alias_list.pop(idx)
-                                save_aliases_to_sheet(t_id, ",".join(alias_list))
+                                save_aliases_to_db(t_id, ",".join(alias_list))
                                 st.rerun()
             else:
                 st.info("No aliases currently set.")
@@ -2848,7 +1318,7 @@ else:
                     new_pair = f"{new_wrong.strip()}:{new_right.strip()}"
                     alias_list.append(new_pair)
                     with st.spinner("Saving to DB..."):
-                        if save_aliases_to_sheet(t_id, ",".join(alias_list)):
+                        if save_aliases_to_db(t_id, ",".join(alias_list)):
                             st.success("Alias added successfully!")
                             st.rerun()
                         else: st.error("🚨 Failed to save alias.")
