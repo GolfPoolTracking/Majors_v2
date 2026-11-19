@@ -24,3 +24,12 @@ pytest
 
 `tests/test_scoring.py` covers each rule; `tests/test_leaderboard.py` runs a whole
 finished tournament through the leaderboard with the API and database faked.
+
+## Database
+
+`sql/` holds the database objects that aren't plain tables. Run a file in the
+Supabase SQL editor to recreate that object.
+
+| File | What it is |
+|---|---|
+| `sql/golf_tournament_standings_view.sql` | The view the app reads entries from. It must be a view over `golf_entries`, not a table copy, or new entries won't show. |
