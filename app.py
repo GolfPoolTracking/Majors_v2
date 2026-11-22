@@ -62,6 +62,10 @@ else:
 
 st.set_page_config(page_title="Golf Sweepstakes", page_icon="⛳", layout="wide")
 
+# --- Error reporting (Sentry) ---
+from sentry_setup import init_sentry  # noqa: E402
+init_sentry()
+
 
 # 🚨 UPTIMEROBOT INTERCEPTOR (Protects API Quotas & Keeps Supabase Awake) 🚨
 if st.query_params.get("view") == "ping":
