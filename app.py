@@ -6,9 +6,11 @@ import pytz
 import requests
 import streamlit as st
 
-from auth import make_magic_link_hash, secure_equals
+from auth import make_follow_token, make_magic_link_hash, secure_equals
 from db import (
     insert_entry,
+    fetch_config_row,
+    get_campaign_sent_emails,
     add_subscriber,
     get_subscriber_by_token,
     set_subscribed,
@@ -55,8 +57,11 @@ from golf_api import (
     get_top_20_players,
 )
 from admin_mailing import render_mailing_tab
+from campaigns import campaign_id
+from checklist import build_checklist
+from field_watch import resolve_close_time
 from leaderboard import calculate_leaderboard, get_clean_entries, render_pga_leaderboard
-from scoring import check_api_par_warning, get_calculated_par, get_dropdown_index, safe_int
+from scoring import MAX_TOP_20, available_picks, check_api_par_warning, get_calculated_par, get_dropdown_index, resolve_current_round, safe_int, winning_score
 
 # 🚨 GLOBAL VARIABLES 🚨
 if "payment_options" in st.secrets:
@@ -169,6 +174,60 @@ else:
 DEFAULT_RULES = """### 🏆 Tournament Rules\n\n⛳ **The Team:** Pick **5** players, max **2** from Top 20.\n\n🏌️‍♂️ **Scoring:** The **best 4 scores** each day count.\n\n✂️ **The Cut:** If **2 or more** picks miss the cut, team is out.\n\n⚖️ **Tie Break:** Predict Winner's total score to par.\n\n⏳ **Deadline:** Midnight before the tournament.\n\n💰 **Entry Fee:** **$30**."""
 
 
+def pick_selectors(prefix, field, initial=None):
+    """The 5 pick boxes, outside any form so they react as you pick: each box hides players
+    already picked in another box, and the Top 20 once 2 are picked. Returns the 5 picks."""
+    keys = [f"{prefix}_pick{i}" for i in range(5)]
+    for i, k in enumerate(keys):
+        if k not in st.session_state:
+            idx = get_dropdown_index((initial or [""] * 5)[i] if initial and i < len(initial) else "", field)
+            st.session_state[k] = field[idx - 1] if idx else ""
+    current = [st.session_state[k] for k in keys]
+    for i, k in enumerate(keys):
+        st.selectbox(f"Pick {i + 1}", available_picks(field, current[:i] + current[i + 1:], current[i]), key=k)
+    picks = [st.session_state[k] for k in keys]
+    n_top = sum(1 for p in picks if "(Top 20" in p)
+    n_picked = sum(1 for p in picks if p)
+    msg = f"**{n_picked} of 5 picked** · ⭐ Top 20: **{n_top} of {MAX_TOP_20}**"
+    if n_top >= MAX_TOP_20:
+        msg += " (limit reached, so the other Top 20 players are hidden)"
+    st.caption(msg)
+    return picks
+
+
+def clear_pick_selectors(prefix):
+    for i in range(5):
+        st.session_state.pop(f"{prefix}_pick{i}", None)
+
+
+def render_setup_checklist(t_id, t_start, pinned):
+    cfg = fetch_config_row(t_id)
+    entries = get_entries_df(t_id)
+    n_unpaid = 0
+    if not entries.empty and 'Paid' in entries.columns:
+        unpaid = entries[~entries['Paid'].fillna(False).astype(bool)]
+        if 'Payment Method' in unpaid.columns:
+            unpaid = unpaid[~unpaid['Payment Method'].astype(str).str.startswith('Other')]
+        n_unpaid = len(unpaid)
+    close_uk = resolve_close_time(cfg.get('close_time'), t_start)
+    now_uk = datetime.datetime.now(pytz.timezone('Europe/London'))
+    try:
+        start_dt = datetime.datetime.strptime(str(t_start)[:19], "%Y-%m-%d %H:%M:%S") if t_start else None
+    except ValueError:
+        start_dt = None
+    items = build_checklist(
+        cfg, pinned=bool(pinned and str(pinned.get("id")) == str(t_id)), field_count=len(get_raw_entry_list(t_id) or []),
+        n_entries=len(entries), n_unpaid=n_unpaid,
+        entries_open_sent=len(get_campaign_sent_emails(campaign_id(t_id, "entries_open"))),
+        started=bool(start_dt and datetime.datetime.now() >= start_dt), closed=bool(close_uk and now_uk >= close_uk))
+    done = sum(1 for ok, _, _ in items if ok)
+    with st.expander(f"📋 Setup checklist ({done}/{len(items)})", expanded=done < len(items)):
+        for ok, label, hint in items:
+            st.markdown(f"{'✅' if ok else '⬜'} {label}")
+            if not ok:
+                st.caption(hint)
+
+
 def generate_short_link(long_url):
     try:
         import urllib.parse
@@ -219,8 +278,7 @@ if is_public:
     
     cache = get_api_cache()
     lb_key = f"lb_{tid}"
-    is_live_now = (lb_key in cache and "R4 Live Scoring" in cache[lb_key].get("mode", ""))
-    refresh_script = """setInterval(function(){ window.location.reload(); }, 300000);""" if is_live_now else ""
+    is_play_live = is_tournament_started and t_status not in ['completed', 'complete']
     
     st.html(f"""
     <script>
@@ -238,7 +296,6 @@ if is_public:
             script.src = "https://cloud.umami.is/script.js"; 
             document.head.appendChild(script);
         }}
-        {refresh_script}
     </script>
     """)
     
@@ -321,6 +378,19 @@ if is_public:
     valid_p = [p.split(" (Top 20")[0] for p in formatted_field]
     full_df, total_count = get_clean_entries(tid, True, valid_players=valid_p, dns_players=public_dns.split(","))
     
+    # ⭐ "Follow my team": a personal link (…&me=<token>) pins and highlights that person's teams.
+    def follow_url_for(email):
+        return f"{BASE_URL}?view=public&tourney_id={tid}&me={make_follow_token(email, tid, MAGIC_LINK_SECRET)}"
+
+    follow_ids = set()
+    follow_token = st.query_params.get("me")
+    if follow_token:
+        entries_for_follow = get_entries_df(tid)
+        if not entries_for_follow.empty and 'Email' in entries_for_follow.columns:
+            for _, er in entries_for_follow.iterrows():
+                if secure_equals(make_follow_token(er['Email'], tid, MAGIC_LINK_SECRET), follow_token):
+                    follow_ids.add(str(er['Sheet_Row']))
+
     is_authenticated = False
     raw_email = st.query_params.get("edit_email")
     auth_email = raw_email[0] if isinstance(raw_email, list) else raw_email
@@ -423,9 +493,21 @@ if is_public:
                     <div style="font-size: 32px; font-weight: bold;">{total_count}</div>
                 </div>
             """, unsafe_allow_html=True)
+            if follow_ids:
+                st.caption("⭐ You're following your team. It will be pinned to the top of the leaderboard once entries are revealed.")
         else:
-            search_val = st.text_input("🔍 Find a Player...", placeholder="Type a name to filter the leaderboard...")
-            calculate_leaderboard(tid, tnm, t_start, par_override=current_par_override, dns_input=public_dns, valid_players=valid_p, is_admin_view=False, hide_title=True, search_query=search_val)
+            # While play is on, only this section refreshes (every 5 minutes), so the page keeps its
+            # scroll position and the open tab instead of reloading. API calls are still governed by
+            # the smart polling cache in golf_api.py.
+            if follow_token and follow_ids:
+                st.caption("⭐ Your team is pinned to the top. Bookmark this page or add it to your home screen to come straight back to it.")
+            elif follow_token:
+                st.caption("⭐ No team found for this link yet. Once you enter, your team will be pinned here.")
+            @st.fragment(run_every=300 if is_play_live else None)
+            def live_leaderboard():
+                search_val = st.text_input("🔍 Find a Player...", placeholder="Type a name to filter the leaderboard...")
+                calculate_leaderboard(tid, tnm, t_start, par_override=current_par_override, dns_input=public_dns, valid_players=valid_p, is_admin_view=False, hide_title=True, search_query=search_val, follow_ids=follow_ids)
+            live_leaderboard()
     current_tab += 1
     
     if is_accepting_entries:
@@ -448,13 +530,13 @@ if is_public:
                 if close_time: st.info(f"⏳ **Deadline:** The entry form will automatically close on **{close_time_str_ui}**.")
                 st.caption("Fill out the form below to lock in your team. You will receive an email confirmation.")
                 
-                with st.form("entry_form"):
+                with st.container(border=True):
                     col1, col2 = st.columns(2)
                     with col1: form_name = st.text_input("Full Name *")
                     with col2: form_email = st.text_input("Email Address *")
                     
                     st.markdown("**Select your 5 Golfers (Maximum of 2 Top 20 players):**")
-                    p1, p2, p3, p4, p5 = [st.selectbox(f"Pick {i}", [""] + formatted_field) for i in range(1, 6)]
+                    p1, p2, p3, p4, p5 = pick_selectors(f"new_{tid}", formatted_field)
                     
                     col3, col4 = st.columns(2)
                     with col3: 
@@ -465,7 +547,7 @@ if is_public:
                     
                     form_optin = st.checkbox("📬 Email me when entries open for future majors", value=True)
                     
-                    submitted = st.form_submit_button("Submit Team", type="primary")
+                    submitted = st.button("Submit Team", type="primary")
                     
                     if submitted:
                         picks = [p1, p2, p3, p4, p5]; clean_picks = [p for p in picks if p != ""]
@@ -498,9 +580,10 @@ if is_public:
                                     if form_optin:
                                         name_parts = form_name.strip().split(" ", 1)
                                         add_subscriber(form_email, name_parts[0], name_parts[1] if len(name_parts) > 1 else "", source="Entry form")
-                                    send_confirmation_email(form_email, form_name, clean_picks, form_tie, final_payment, tnm, tid, is_edit=False, close_time_str=close_time_str_email, logo_url=public_logo)
+                                    send_confirmation_email(form_email, form_name, clean_picks, form_tie, final_payment, tnm, tid, is_edit=False, close_time_str=close_time_str_email, logo_url=public_logo, follow_url=follow_url_for(form_email))
                                     st.session_state[f"success_{tid}"] = True
                                     st.session_state[f"success_email_{tid}"] = form_email
+                                    clear_pick_selectors(f"new_{tid}")
                                     st.rerun()
                                 else: 
                                     st.error("🚨 Could not save entry. Please contact the administrator.")
@@ -513,13 +596,13 @@ if is_public:
                 row_data = st.session_state["editing_row"]
                 st.markdown("### ✏️ Edit Your Team")
                 
-                with st.form("edit_form"):
+                with st.container(border=True):
                     col1, col2 = st.columns(2)
                     with col1: edit_name = st.text_input("Name", value=row_data['Name'])
                     with col2: edit_email = st.text_input("Email", value=row_data['Email'], disabled=True)
                     
                     p_vals = row_data['Picks'] + [""] * 5
-                    ep1, ep2, ep3, ep4, ep5 = [st.selectbox(f"Pick {i+1}", [""] + formatted_field, index=get_dropdown_index(p_vals[i], formatted_field)) for i in range(5)]
+                    ep1, ep2, ep3, ep4, ep5 = pick_selectors(f"edit_{tid}_{row_data['Sheet_Row']}", formatted_field, p_vals[:5])
                     
                     col3, col4 = st.columns(2)
                     with col3:
@@ -531,7 +614,7 @@ if is_public:
                         edit_payment = st.selectbox("Payment Method *", pay_opts, index=safe_idx)
                     
                     c_submit, c_cancel = st.columns([1, 4])
-                    with c_submit: update_submitted = st.form_submit_button("Update Team", type="primary")
+                    with c_submit: update_submitted = st.button("Update Team", type="primary")
                     
                     if update_submitted:
                         new_picks = [ep1, ep2, ep3, ep4, ep5]; clean_picks = [p for p in new_picks if p != ""]
@@ -560,7 +643,8 @@ if is_public:
                             with st.spinner("Updating your team..."):
                                 if update_specific_entry(tid, row_data['Sheet_Row'], [ts, edit_name, edit_email, final_edit_payment, edit_tie, ep1, ep2, ep3, ep4, ep5]):
                                     log_event("ENTRY UPDATED", f"Team updated by {edit_name}")
-                                    send_confirmation_email(edit_email, edit_name, clean_picks, edit_tie, final_edit_payment, tnm, tid, is_edit=True, close_time_str=close_time_str_email, logo_url=public_logo)
+                                    send_confirmation_email(edit_email, edit_name, clean_picks, edit_tie, final_edit_payment, tnm, tid, is_edit=True, close_time_str=close_time_str_email, logo_url=public_logo, follow_url=follow_url_for(edit_email))
+                                    clear_pick_selectors(f"edit_{tid}_{row_data['Sheet_Row']}")
                                     st.session_state["editing_row"] = None
                                     st.session_state[f"edit_success_{tid}"] = True
                                     st.session_state[f"edit_success_email_{tid}"] = edit_email
@@ -569,7 +653,9 @@ if is_public:
                                     st.error("🚨 Could not update entry.")
                                     st.session_state[f"last_upd_{tid}"] = None
                                     
-                if st.button("Cancel Edit"): st.session_state["editing_row"] = None; st.rerun()
+                if st.button("Cancel Edit"):
+                    clear_pick_selectors(f"edit_{tid}_{row_data['Sheet_Row']}")
+                    st.session_state["editing_row"] = None; st.rerun()
             else:
                 email_input = ""
                 if st.session_state.get(f"edit_success_{tid}"):
@@ -595,6 +681,8 @@ if is_public:
                     user_df, _ = get_clean_entries(tid, True, valid_players=valid_p, dns_players=public_dns.split(","), email_filter=email_input)
                     if not user_df.empty:
                         st.success(f"Found {len(user_df)} team(s) linked to this email.")
+                        if is_authenticated:
+                            st.markdown(f"⭐ **[Your personal leaderboard link]({follow_url_for(email_input)})**: your team pinned to the top. Bookmark it or add it to your home screen.")
                         
                         if not is_authenticated and is_accepting_entries:
                             if st.button("📧 Send Secure Edit Link for All Entries", type="primary", width="stretch"):
@@ -809,6 +897,8 @@ else:
             
         if t_id:
             st.session_state['current_t_id'] = t_id
+
+            render_setup_checklist(t_id, t_start, pinned)
 
             st.subheader("🌍 OWGR")
             if st.button("📥 Force Refresh Top 20", type="primary"): 
@@ -1422,5 +1512,12 @@ else:
 
         with t12:
             st.subheader("📣 Mailing List")
-            render_mailing_tab(t_id, t_name_display, t_start, admin_logo,
-                               fetch_short_url_from_db(t_id) or f"{BASE_URL}?view=public&tourney_id={t_id}")
+            render_mailing_tab(
+                t_id, t_name_display, t_start, admin_logo,
+                fetch_short_url_from_db(t_id) or f"{BASE_URL}?view=public&tourney_id={t_id}",
+                get_standings=lambda: calculate_leaderboard(t_id, t_key, t_start, par_override=current_par_override, dns_input=current_dns, valid_players=valid_p, is_admin_download=True, is_admin_view=False),
+                follow_url_fn=lambda email: f"{BASE_URL}?view=public&tourney_id={t_id}&me={make_follow_token(email, t_id, MAGIC_LINK_SECRET)}",
+                current_round=resolve_current_round(lb_data, live_details), t_status=t_status,
+                payout_settings={"confirmed": settings.get(f"payout_confirmed_{t_id}", False),
+                                 "prizes": [float(settings.get(f"payout_{i}_{t_id}") or 0) for i in (1, 2, 3)],
+                                 "winning_score": winning_score(lb_data) if lb_data else None})

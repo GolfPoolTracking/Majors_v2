@@ -17,6 +17,7 @@ scores count each round, and the leaderboard updates from live tournament data.
 | `campaigns.py` | Mailing-list email templates ("entries open", "closing soon") and the Gmail sender |
 | `admin_mailing.py` | The admin 📣 Mailing List tab: subscribers, preview, test send, queue a send |
 | `send_campaign.py` | Sends a queued mailing-list email (GitHub Actions) |
+| `checklist.py` | The admin sidebar's setup checklist (pure logic) |
 | `field_watch.py` | Scheduled field check (GitHub Actions): emails the admin when the pinned tournament's field changes before entries close |
 
 ## Tests
@@ -60,8 +61,18 @@ Replaces Mailchimp. Subscribers live in `golf_subscribers`; people join from the
 (`?view=signup`) or by leaving "Email me when entries open" ticked on the entry form, and leave
 from the unsubscribe link in every email (`?view=unsubscribe&token=…`).
 
-Send from the admin **📣 Mailing List** tab: pick "Entries open" or "Closing soon reminder", edit the
-subject and opening message, preview, **Send a test to me**, then **Send to N subscribers**. That
+Send from the admin **📣 Mailing List** tab. There are five emails:
+
+| Email | Goes to |
+|---|---|
+| 📣 Entries open | Subscribers |
+| ⏳ Closing soon | Subscribers who haven't entered |
+| 💸 Payment reminder | Entrants with an unpaid entry (not "Other"), one email listing all their unpaid teams |
+| 📊 Round recap | Entrants (not unsubscribed): their position and the top 5 after the chosen round |
+| 🏆 Final results | Entrants: their finish, the podium and payouts, the top 10. Your summary email lists who to pay. |
+
+Pick one, edit the subject and opening message, preview, **Send a quick test to me**, then
+**Send to N people**. "🧪 Just me" runs the whole send through GitHub Actions to you alone. That
 queues the email and starts `.github/workflows/send-emails.yml`, which sends one email per person
 (about 2 seconds apart), logs each one in `golf_email_sends` so nobody is emailed twice for the same
 tournament and kind, and emails the admin a summary. "Closing soon" skips anyone who has entered.
@@ -69,3 +80,10 @@ tournament and kind, and emails the admin a summary. "Closing soon" skips anyone
 To let the admin page start the workflow, add a `github_token` Streamlit secret: a fine-grained
 GitHub token for this repository with **Actions: Read and write**. Without it, the email is queued
 and you press **Actions → Send emails → Run workflow** yourself.
+
+## Follow my team
+
+Each entrant gets a personal link (`?view=public&tourney_id=…&me=<token>`) in their confirmation
+email, round recaps and results, and on the Check Entry tab after the secure link. It pins their
+teams, open and highlighted, to the top of the leaderboard. The token is signed with
+`magic_link_secret`, so it can't be guessed from an email address.

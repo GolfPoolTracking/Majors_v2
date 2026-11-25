@@ -36,11 +36,45 @@ def test_message_has_unsubscribe_header():
     assert msg["Subject"] == "Hero Sweepstakes - Entries Open"
 
 
-def test_pick_recipients():
+def test_select_recipients_mailing_list():
     subs = [{"email": "b@x"}, {"email": "a@x"}, {"email": "c@x", "unsubscribed_at": "2026-01-01"}, {"email": "d@x"}]
-    got = send_campaign.pick_recipients(subs, {"d@x"}, {"b@x"}, "closing_soon")
-    assert [s["email"] for s in got] == ["a@x"]
-    assert [s["email"] for s in send_campaign.pick_recipients(subs, set(), {"b@x"}, "entries_open")] == ["a@x", "b@x", "d@x"]
+    job = {"kind": "closing_soon"}
+    assert [r["email"] for r in send_campaign.select_recipients(job, subs, {"d@x"}, {"b@x"})] == ["a@x"]
+    job = {"kind": "entries_open"}
+    assert [r["email"] for r in send_campaign.select_recipients(job, subs, set(), {"b@x"})] == ["a@x", "b@x", "d@x"]
+
+
+def test_select_recipients_entrant_lists():
+    subs = [{"email": "a@x", "unsub_token": "ta"}, {"email": "c@x", "unsubscribed_at": "2026", "unsub_token": "tc"}]
+    recips = [{"email": "C@x", "data": {"n": 1}}, {"email": "a@x", "first_name": "A"}, {"email": "z@x"}]
+    pay = send_campaign.select_recipients({"kind": "payment_reminder", "recipients": recips}, subs, set(), set())
+    assert [r["email"] for r in pay] == ["a@x", "c@x", "z@x"]          # unsubscribed still gets a payment reminder
+    assert all(r["unsub_token"] is None for r in pay)                   # and no unsubscribe link
+    recap = send_campaign.select_recipients({"kind": "round_recap", "recipients": recips}, subs, {"z@x"}, set())
+    assert [(r["email"], r["unsub_token"]) for r in recap] == [("a@x", "ta")]
+
+
+def test_test_run_goes_only_to_the_admin_with_sample_data():
+    job = {"kind": "results", "test_to": "Me@x", "recipients": [{"email": "a@x", "data": {"teams": [1]}}]}
+    got = send_campaign.select_recipients(job, [{"email": "me@x", "first_name": "Eddie"}], set(), set())
+    assert got == [{"email": "me@x", "first_name": "Eddie", "data": {"teams": [1]}, "unsub_token": None}]
+
+
+def test_entrant_emails_render():
+    recap = build_job("round_recap", 907, "Hero", CLOSE, "", round_no=2,
+                      extra={"n_teams": 40, "top": [{"rank": "1", "name": "Ann", "score": -12}, {"rank": "T2", "name": "Bob", "score": -9}]})
+    assert recap["campaign_id"] == "907:round_recap:R2" and "After Round 2" in recap["subject"]
+    body = render_html(recap, "Bob", "", {"teams": [{"name": "Bob", "rank": "T2", "score": -9}], "follow_url": "https://f"})
+    assert "tied 2nd of 40" in body and "⭐ Bob" in body and "https://f" in body and "Unsubscribe" not in body
+
+    res = build_job("results", 907, "Hero", CLOSE, "", extra={"n_teams": 40, "payouts_confirmed": True, "winning_score": -20,
+                    "podium": [{"rank": 1, "name": "Ann", "score": -12, "payout": 600}], "top": []})
+    body = render_html(res, "Ann", "", {"teams": [{"name": "Ann", "rank": "1", "score": -12, "payout": 600}]})
+    assert "You won $600" in body and "🥇 <b>Ann</b> (-12): $600" in body and "-20" in body
+
+    pay = build_job("payment_reminder", 907, "Hero", CLOSE, "")
+    body = render_html(pay, "Cy", "", {"teams": [{"name": "Cy", "method": "PayPal to me@x"}], "amount": 30})
+    assert "Amount due: $30" in body and "PayPal to me@x" in body
 
 
 # --- send_campaign.main with a fake Supabase and a fake mailer ---

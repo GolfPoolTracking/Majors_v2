@@ -432,3 +432,23 @@ def split_prizes(ranked_df, prize_pool):
         for p_data in players:
             podium_players.append({"name": p_data['name'], "rank": base_r, "payout": payout, "score": p_data['score'], "tie": p_data['tie']})
     return podium_players
+
+
+# ---------------------------------------------------------------------------
+# Entry form: which players each pick box offers
+# ---------------------------------------------------------------------------
+
+MAX_TOP_20 = 2
+
+
+def available_picks(field, other_picks, current="", max_top20=MAX_TOP_20):
+    """Options for one pick box: the field, minus players already in the other boxes and,
+    once the other boxes hold max_top20 Top 20 players, minus the rest of the Top 20.
+    The box's current choice is always kept so it never silently disappears."""
+    others = {p for p in other_picks if p}
+    top20_full = sum(1 for p in others if "(Top 20" in p) >= max_top20
+    opts = [p for p in field
+            if p == current or (p not in others and not (top20_full and "(Top 20" in p))]
+    if current and current not in opts:
+        opts.insert(0, current)
+    return [""] + opts

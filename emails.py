@@ -82,7 +82,7 @@ def send_field_change_email(user_email, name, removed_picks, added_to_field, t_n
         print(f"Email Error (send_field_change): {e}")
         return False
 
-def send_confirmation_email(user_email, name, picks, tie_breaker, payment, t_name, t_id, is_edit=False, close_time_str="", logo_url=""):
+def send_confirmation_email(user_email, name, picks, tie_breaker, payment, t_name, t_id, is_edit=False, close_time_str="", logo_url="", follow_url=""):
     sender, pwd = st.secrets.get("email_sender"), st.secrets.get("email_password")
     if not sender or not pwd: return False
     try:
@@ -119,8 +119,9 @@ def send_confirmation_email(user_email, name, picks, tie_breaker, payment, t_nam
             {edit_notice}
             
             <div style="text-align: center; margin: 35px 0 20px 0;">
-                <a href="{public_link}" target="_blank" style="background-color: #34495e; color: white; padding: 12px 24px; text-decoration: none; border-radius: 4px; display: inline-block; font-weight: bold; font-size: 15px;">View Live Leaderboard</a>
+                <a href="{follow_url or public_link}" target="_blank" style="background-color: #34495e; color: white; padding: 12px 24px; text-decoration: none; border-radius: 4px; display: inline-block; font-weight: bold; font-size: 15px;">{'⭐ Follow Your Team' if follow_url else 'View Live Leaderboard'}</a>
             </div>
+            {'<p style="font-size: 13px; color: #7f8c8d; text-align: center;">This is your personal leaderboard link: your team is pinned to the top. Bookmark it or add it to your home screen.</p>' if follow_url else ''}
           </body>
         </html>
         """

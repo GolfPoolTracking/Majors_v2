@@ -54,3 +54,23 @@ def test_final_standings(finished_tournament):
         ('Carol', 188, True, '4'),             # two missed the cut: eliminated (99s in R3/R4)
     ]
     assert df.loc[0, 'RSc'] == {1: -4, 2: -4, 3: -4, 4: -4}
+
+
+def test_followed_teams_are_pinned_and_highlighted(finished_tournament, monkeypatch):
+    shown = []
+    monkeypatch.setattr(leaderboard.st, 'markdown', lambda body, **k: shown.append(body))
+    monkeypatch.setattr(leaderboard.st, 'balloons', lambda: None)
+    monkeypatch.setattr(leaderboard.st, 'session_state', {})
+    monkeypatch.setattr(leaderboard, 'get_settings_cache', lambda: {})
+    leaderboard.calculate_leaderboard('T1', 'Test Open', None, is_admin_view=True, hide_title=True, follow_ids={1, 4})
+    pinned = next(b for b in shown if '⭐ Your teams' in b)
+    assert pinned.count('<details open') == 2 and 'Alice' in pinned and 'Bob' not in pinned
+    full = next(b for b in shown if 'Score (Tie)' in b)
+    assert full.count('⭐ ') == 2 and full.count('<details') == 4 and '<details open' not in full
+
+
+def test_no_follow_means_no_pinned_section(finished_tournament, monkeypatch):
+    shown = []
+    monkeypatch.setattr(leaderboard.st, 'markdown', lambda body, **k: shown.append(body))
+    leaderboard.calculate_leaderboard('T1', 'Test Open', None, is_admin_view=True, hide_title=True)
+    assert not any('Your team' in b for b in shown) and any('Score (Tie)' in b for b in shown)

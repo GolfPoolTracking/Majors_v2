@@ -278,3 +278,14 @@ def test_aliases_map_misspelt_picks_to_real_players():
 def test_pre_tournament_adds_whole_field_at_level_par():
     p = build_player_info([], 0, 0, valid_players=['Rory McIlroy'], t_status='pre')
     assert p['rory mcilroy'] == {'status': 'active', 'rounds': {}, 'total': 0, 'holes_played': 0}
+
+
+def test_available_picks_hides_taken_and_extra_top20():
+    from scoring import available_picks
+    field = ["A (Top 20 - #1)", "B (Top 20 - #2)", "C (Top 20 - #3)", "D", "E"]
+    assert available_picks(field, ["D", "", "", ""], "") == ["", "A (Top 20 - #1)", "B (Top 20 - #2)", "C (Top 20 - #3)", "E"]
+    # two Top 20 already picked elsewhere: the third is hidden, but a box keeps its own choice
+    assert available_picks(field, ["A (Top 20 - #1)", "B (Top 20 - #2)"], "") == ["", "D", "E"]
+    assert available_picks(field, ["A (Top 20 - #1)", "B (Top 20 - #2)"], "C (Top 20 - #3)") == ["", "C (Top 20 - #3)", "D", "E"]
+    # an existing pick that left the field stays selectable so an edit doesn't silently drop it
+    assert available_picks(field, [], "Z")[:2] == ["", "Z"]
