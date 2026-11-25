@@ -382,3 +382,14 @@ def get_campaign_sent_emails(campaign_id):
     except Exception as e:
         print(f"DB Read Error (campaign sends): {e}")
         return set()
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_config_row(t_id):
+    """The whole golf_tournament_configs row (without the big API backup), for the setup checklist."""
+    try:
+        res = get_supabase().table('golf_tournament_configs').select(
+            'close_time, logo_url, rules, alerted_field, payout_config, short_url').eq('tournament_id', str(t_id)).execute()
+        return res.data[0] if res.data else {}
+    except Exception as e:
+        print(f"DB Read Error (config row): {e}")
+        return {}

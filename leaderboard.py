@@ -156,7 +156,7 @@ def get_clean_entries(t_id, public_mode, valid_players=[], dns_players=[], email
         return df, total_entries
     except Exception as e: return pd.DataFrame(), 0
 
-def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", valid_players=None, logo_url=None, is_admin_download=False, header_only=False, is_admin_view=False, hide_title=False, search_query=""):
+def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", valid_players=None, logo_url=None, is_admin_download=False, header_only=False, is_admin_view=False, hide_title=False, search_query="", follow_ids=None):
     try:
         lb_data, next_f, last_f, full_data, data_source = fetch_smart_leaderboard(t_id)
         
@@ -295,7 +295,7 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
             total, c_map, r_sc, cum_sc = score_team(picks, p_info_lower, r_range)
             elim = is_team_eliminated(picks, p_info_lower, current_r, is_round_finished_consensus)
             t_val = extract_tie_breaker(row['Tie Breaker']) if 'Tie Breaker' in row else 0
-            results.append({"Participant": str(row[name_col]), "DisplayName": str(row['_Display_Name']), "Total": total, "Elim": elim, "Picks": picks, "CMap": c_map, "RSc": r_sc, "Cum": cum_sc, "Diff": abs(t_val - win_score), "Tie": t_val, "SheetWarnings": sheet_warns})
+            results.append({"EntryId": row.get('Sheet_Row'), "Email": str(row.get('Email') or '').strip().lower(), "Participant": str(row[name_col]), "DisplayName": str(row['_Display_Name']), "Total": total, "Elim": elim, "Picks": picks, "CMap": c_map, "RSc": r_sc, "Cum": cum_sc, "Diff": abs(t_val - win_score), "Tie": t_val, "SheetWarnings": sheet_warns})
 
         if not results:
             if is_admin_download: return pd.DataFrame()
@@ -358,6 +358,9 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
                 
                 st.markdown(final_html, unsafe_allow_html=True)
         
+        follow_ids = {str(x) for x in (follow_ids or [])}
+        followed = df[df['EntryId'].astype(str).isin(follow_ids)] if follow_ids else df.iloc[0:0]
+
         if search_query:
             df = df[df['Participant'].str.contains(search_query, case=False, na=False)]
             if df.empty:
@@ -365,16 +368,11 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
         
         is_live_active_now = (sweep_max_round == current_r and t_status in ['inprogress', 'active'])
 
-        max_name_len = max([len(str(n)) for n in df['Participant']]) if not df.empty else 15
+        all_names = list(df['Participant']) + list(followed['Participant'])
+        max_name_len = max([len(str(n)) for n in all_names]) if all_names else 15
         name_min_width = max(max_name_len * 8, 110) 
 
-        leaderboard_html = "<div style='display: flex; flex-direction: column; gap: 4px; overflow-x: auto;'>"
-
-        if not hide_rank:
-            legend_html = f"<div style='display: grid; grid-template-columns: 34px 40px {name_min_width}px 80px auto; gap: 8px; width: max-content; font-size: 0.85em; color: var(--text-color); opacity: 0.7; margin-bottom: 2px;'><div></div><div></div><div></div><div style='white-space: nowrap;'>🏌️‍♂️ Score (Tie)</div><div></div></div>"
-            leaderboard_html += legend_html
-        
-        for i, row in df.iterrows():
+        def render_row(i, row, is_open=False, is_followed=False):
             d = row['DRank']
             
             if hide_rank: lbl_val = "-"
@@ -406,9 +404,27 @@ def calculate_leaderboard(t_id, t_name, t_start, par_override=0, dns_input="", v
             
             table_html = render_roster_table(row['Picks'], p_info_lower, r_range, row['CMap'], is_live_active_now, row['RSc'], history_ranks[i], row['Elim'], current_r, hide_rank)
             
-            summary_html = f"<div style='display: grid; grid-template-columns: 40px {name_min_width}px 80px auto; gap: 8px; align-items: center; width: max-content;'><div style='font-weight: bold;'>{lbl_val}</div><div style='font-weight: bold; white-space: nowrap;'>{row['DisplayName']}</div>{score_block}{warn_html}</div>"
+            star = "⭐ " if is_followed else ""
+            summary_html = f"<div style='display: grid; grid-template-columns: 40px {name_min_width}px 80px auto; gap: 8px; align-items: center; width: max-content;'><div style='font-weight: bold;'>{lbl_val}</div><div style='font-weight: bold; white-space: nowrap;'>{star}{row['DisplayName']}</div>{score_block}{warn_html}</div>"
+            highlight = " style='border: 2px solid #f1c40f !important;'" if is_followed else ""
             
-            leaderboard_html += f"<details><summary>{summary_html}</summary><div class='expanded-content'>{table_html}</div></details>"
+            return f"<details{' open' if is_open else ''}{highlight}><summary>{summary_html}</summary><div class='expanded-content'>{table_html}</div></details>"
+
+        if not followed.empty:
+            pinned_html = "<div style='display: flex; flex-direction: column; gap: 4px; overflow-x: auto; margin-bottom: 14px;'>"
+            pinned_html += f"<div style='font-weight: bold; margin-bottom: 2px;'>⭐ {'Your team' if len(followed) == 1 else 'Your teams'}</div>"
+            for i, row in followed.iterrows():
+                pinned_html += render_row(i, row, is_open=True, is_followed=True)
+            st.markdown(pinned_html + "</div>", unsafe_allow_html=True)
+
+        leaderboard_html = "<div style='display: flex; flex-direction: column; gap: 4px; overflow-x: auto;'>"
+
+        if not hide_rank:
+            legend_html = f"<div style='display: grid; grid-template-columns: 34px 40px {name_min_width}px 80px auto; gap: 8px; width: max-content; font-size: 0.85em; color: var(--text-color); opacity: 0.7; margin-bottom: 2px;'><div></div><div></div><div></div><div style='white-space: nowrap;'>🏌️‍♂️ Score (Tie)</div><div></div></div>"
+            leaderboard_html += legend_html
+        
+        for i, row in df.iterrows():
+            leaderboard_html += render_row(i, row, is_followed=str(row['EntryId']) in follow_ids)
             
         leaderboard_html += "</div>"
         

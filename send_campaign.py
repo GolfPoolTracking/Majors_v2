@@ -3,8 +3,10 @@
 The admin page's 📣 Mailing List tab queues a job in golf_app_settings and starts this workflow.
 It emails every subscribed address one at a time, records each send in golf_email_sends, and
 skips anyone that campaign has already reached, so a re-run or a later re-send never doubles up.
-"Closing soon" also skips anyone who has already entered the tournament. When it finishes, it
-emails the admin a summary.
+"Closing soon" also skips anyone who has already entered the tournament. Entrant emails (payment
+reminders, round recaps, results) carry their own recipient list with personal data. A job with
+"test_to" goes only to that address, as a full dry run of the send. When it finishes, it emails the
+admin a summary.
 
 Environment variables: SUPABASE_URL, SUPABASE_KEY, EMAIL_SENDER, EMAIL_PASSWORD,
 ALERT_EMAIL (optional; where the summary goes, default EMAIL_SENDER),
@@ -16,7 +18,8 @@ import sys
 import time
 from email.mime.text import MIMEText
 
-from campaigns import EMAIL_JOB_KEY, GmailSender, build_message, unsubscribe_url
+from campaigns import (EMAIL_JOB_KEY, RESPECTS_UNSUBSCRIBE, GmailSender, build_message, sample_data,
+                       unsubscribe_url)
 
 MAX_JOB_AGE = datetime.timedelta(hours=12)
 
@@ -32,16 +35,37 @@ def now_utc():
     return datetime.datetime.now(datetime.timezone.utc)
 
 
-def pick_recipients(subscribers, already_sent, entered, kind):
-    """Subscribed addresses still to email, in a stable order."""
-    out = []
-    for s in sorted(subscribers, key=lambda s: s["email"]):
-        email = s["email"].strip().lower()
-        if s.get("unsubscribed_at") or email in already_sent:
+def select_recipients(job, subscribers, already_sent, entered):
+    """[{email, first_name, data, unsub_token}] still to email, in a stable order."""
+    kind = job["kind"]
+    subs = {str(s["email"]).strip().lower(): s for s in subscribers}
+
+    if job.get("test_to"):
+        email = job["test_to"].strip().lower()
+        me = subs.get(email, {})
+        return [{"email": email, "first_name": me.get("first_name") or "", "data": sample_data(job),
+                 "unsub_token": me.get("unsub_token")}]
+
+    if job.get("recipients") is not None:
+        base = [{"email": str(r["email"]).strip().lower(), "first_name": r.get("first_name") or "",
+                 "data": r.get("data") or {}} for r in job["recipients"]]
+    else:
+        base = [{"email": e, "first_name": s.get("first_name") or "", "data": {}}
+                for e, s in subs.items() if not s.get("unsubscribed_at")]
+        if kind == "closing_soon":
+            base = [r for r in base if r["email"] not in entered]
+
+    out, seen = [], set()
+    for r in sorted(base, key=lambda r: r["email"]):
+        sub = subs.get(r["email"])
+        if r["email"] in already_sent or r["email"] in seen:
             continue
-        if kind == "closing_soon" and email in entered:
+        if kind in RESPECTS_UNSUBSCRIBE and sub and sub.get("unsubscribed_at"):
             continue
-        out.append(s)
+        seen.add(r["email"])
+        # Only mailing-list style emails carry an unsubscribe link; payment and results emails don't.
+        r["unsub_token"] = sub.get("unsub_token") if (sub and kind in RESPECTS_UNSUBSCRIBE) else None
+        out.append(r)
     return out
 
 
@@ -79,7 +103,7 @@ def main(sb=None, sender_cls=GmailSender, sleep=time.sleep):
         rows = sb.table("golf_entries").select("email").eq("tournament_id", t_id).execute().data or []
         entered = {str(r.get("email") or "").strip().lower() for r in rows}
 
-    recipients = pick_recipients(subscribers, already_sent, entered, kind)
+    recipients = select_recipients(job, subscribers, already_sent, entered)
     job.update(status="sending", started_at=now_utc().isoformat(), to_send=len(recipients))
     save_job(job)
     print(f"Sending '{job['subject']}' to {len(recipients)} subscribers "
@@ -91,7 +115,7 @@ def main(sb=None, sender_cls=GmailSender, sleep=time.sleep):
             email = s["email"].strip().lower()
             try:
                 mailer.send(build_message(job, sender, email, s.get("first_name") or "",
-                                          unsubscribe_url(s["unsub_token"])))
+                                          unsubscribe_url(s.get("unsub_token")), s.get("data")))
                 status = "sent"
                 sent += 1
             except Exception as e:
@@ -115,6 +139,8 @@ def main(sb=None, sender_cls=GmailSender, sleep=time.sleep):
                f"Skipped (already sent): {len(already_sent)}"
                + (f"<br>Skipped (already entered): {len(entered & {s['email'] for s in subscribers})}" if kind == "closing_soon" else "")
                + "</p>")
+    if job.get("admin_note_html"):
+        summary += job["admin_note_html"]
     if failed:
         summary += "<p>Failed addresses:</p><ul>" + "".join(f"<li>{e}: {err}</li>" for e, err in failed) + "</ul>"
     msg = MIMEText(summary, "html")
