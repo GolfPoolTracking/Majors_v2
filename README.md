@@ -14,6 +14,7 @@ scores count each round, and the leaderboard updates from live tournament data.
 | `db.py` | Supabase reads and writes (tournament settings, entries, logs) |
 | `emails.py` | Confirmation, edit-link and field-change emails |
 | `auth.py` | Signing and checking the secure edit links |
+| `field_watch.py` | Scheduled field check (GitHub Actions): emails the admin when the pinned tournament's field changes before entries close |
 
 ## Tests
 
@@ -32,4 +33,16 @@ Supabase SQL editor to recreate that object.
 
 | File | What it is |
 |---|---|
+| `sql/golf_app_settings.sql` | App-wide settings table. Holds the pinned active tournament the admin page opens on. |
 | `sql/golf_tournament_standings_view.sql` | The view the app reads entries from. It must be a view over `golf_entries`, not a table copy, or new entries won't show. |
+
+## Field watch
+
+`.github/workflows/field-watch.yml` runs `field_watch.py` every 2 hours. Within 10 days of the
+entry close it compares the pinned tournament's field with the Field tab's alert baseline and
+emails the admin once per change. It never emails entrants; that's still the **🚀 Send Alert
+Emails** button. Run it by hand from the Actions tab (**Field watch → Run workflow**).
+
+It needs these repository secrets (Settings → Secrets and variables → Actions):
+`SUPABASE_URL`, `SUPABASE_KEY`, `RAPIDAPI_KEYS` (comma-separated), `EMAIL_SENDER`,
+`EMAIL_PASSWORD`, and optionally `ALERT_EMAIL` (defaults to `EMAIL_SENDER`).

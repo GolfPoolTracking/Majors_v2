@@ -1,4 +1,5 @@
 """Supabase data access: tournament config, entries and app logs."""
+import datetime
 import json
 
 import pandas as pd
@@ -38,6 +39,35 @@ def update_config(t_id, column, value, t_name=None):
     except Exception as e:
         print(f"DB Write Error ({column}): {e}")
         return False
+
+def get_app_setting(key, default=None):
+    try:
+        res = get_supabase().table('golf_app_settings').select('value').eq('key', key).execute()
+        if res.data: return res.data[0].get('value', default)
+        return default
+    except Exception as e:
+        print(f"DB Read Error (app setting {key}): {e}")
+        return default
+
+def set_app_setting(key, value):
+    try:
+        get_supabase().table('golf_app_settings').upsert({'key': key, 'value': value, 'updated_at': datetime.datetime.now(datetime.timezone.utc).isoformat()}).execute()
+        return True
+    except Exception as e:
+        print(f"DB Write Error (app setting {key}): {e}")
+        return False
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_active_tournament():
+    """The pinned tournament as {"id", "name", "start"}, or None if none is pinned."""
+    val = get_app_setting('active_tournament')
+    return val if isinstance(val, dict) and val.get('id') else None
+
+def save_active_tournament(t_id, t_name, t_start):
+    if set_app_setting('active_tournament', {'id': str(t_id), 'name': t_name, 'start': t_start}):
+        fetch_active_tournament.clear()
+        return True
+    return False
 
 def log_event(event_type, message):
     try:
