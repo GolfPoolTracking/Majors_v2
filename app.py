@@ -9,6 +9,7 @@ import streamlit as st
 from auth import make_magic_link_hash, secure_equals
 from db import (
     insert_entry,
+    fetch_active_tournament,
     fetch_alerted_field_from_db,
     fetch_aliases_from_db,
     fetch_close_time_from_db,
@@ -25,6 +26,7 @@ from db import (
     get_entries_df,
     get_supabase,
     log_event,
+    save_active_tournament,
     save_alerted_field_to_db,
     save_aliases_to_db,
     save_dns_to_db,
@@ -132,6 +134,9 @@ def generate_short_link(long_url):
 settings = get_settings_cache()
 if is_public:
     tid = target_tourney_id
+    if not tid:
+        pinned = fetch_active_tournament()
+        if pinned: tid = pinned["id"]
     if not tid and "tournaments" in st.secrets: tid = next(iter(st.secrets["tournaments"]), None)
     if not tid: st.error("No tournament ID."); st.stop()
     st.session_state['current_t_id'] = tid
@@ -690,31 +695,60 @@ else:
         active = st.selectbox("API Key", ak, index=ak.index(settings.get("active_api_key", ak[0])) if settings.get("active_api_key") in ak else 0)
         st.caption(f"📊 **Quota:** {settings.get(f'quota_{active}', 'Checking (Will update on next API pull)...')}")
         
-        use_manual = st.checkbox("☑️ Manually enter Tournament ID")
-        if use_manual:
-            t_id, t_key, t_start = st.text_input("Tournament ID", value="832"), st.text_input("Tournament Name", value="The Masters"), None
-        else:
-            c_tour, c_year = st.columns(2)
-            with c_tour: tour_val = st.selectbox("Tour", ["2 - PGA Tour", "1 - DP World Tour"])
-            with c_year:
-                this_year = datetime.date.today().year
-                year_val = st.selectbox("Season", [this_year - 1, this_year, this_year + 1], index=1)
-            
-            cache_key_fix = f"fixtures_{tour_val}_{year_val}"
-            
-            if st.button("📥 Load Tournament List", use_container_width=True):
-                with st.spinner("Fetching schedule from API..."):
-                    settings[cache_key_fix] = get_fixture_list(int(tour_val.split(" - ")[0]), year_val)
+        # The admin page opens on the pinned "active" tournament, so it doesn't have to be picked
+        # again every visit. "Switch tournament" shows the pickers; "Pin" makes the choice stick.
+        pinned = fetch_active_tournament()
+        picking = st.session_state.get("picking_tournament", False) or not pinned
+        
+        if not picking:
+            t_id, t_key, t_start = pinned["id"], pinned.get("name") or f"Tournament {pinned['id']}", pinned.get("start")
+            st.info(f"📌 **Active tournament:** {t_key}")
+            if st.button("🔄 Switch tournament", use_container_width=True):
+                st.session_state["picking_tournament"] = True
                 st.rerun()
-                
-            fixtures = settings.get(cache_key_fix, {})
-            
-            if not fixtures:
-                st.info("👆 Click to fetch the schedule, or switch to Manual Entry.")
-                t_id, t_key, t_start = None, None, None
+        else:
+            use_manual = st.checkbox("☑️ Manually enter Tournament ID")
+            if use_manual:
+                t_id, t_key, t_start = st.text_input("Tournament ID", value="832"), st.text_input("Tournament Name", value="The Masters"), None
             else:
-                t_key = st.selectbox("Tournament", list(fixtures.keys()))
-                t_id, t_start = fixtures[t_key]['id'], fixtures[t_key]['start']
+                c_tour, c_year = st.columns(2)
+                with c_tour: tour_val = st.selectbox("Tour", ["2 - PGA Tour", "1 - DP World Tour"])
+                with c_year:
+                    this_year = datetime.date.today().year
+                    year_val = st.selectbox("Season", [this_year - 1, this_year, this_year + 1], index=1)
+            
+                cache_key_fix = f"fixtures_{tour_val}_{year_val}"
+            
+                if st.button("📥 Load Tournament List", use_container_width=True):
+                    with st.spinner("Fetching schedule from API..."):
+                        settings[cache_key_fix] = get_fixture_list(int(tour_val.split(" - ")[0]), year_val)
+                    st.rerun()
+                
+                fixtures = settings.get(cache_key_fix, {})
+            
+                if not fixtures:
+                    st.info("👆 Click to fetch the schedule, or switch to Manual Entry.")
+                    t_id, t_key, t_start = None, None, None
+                else:
+                    fixture_names = list(fixtures.keys())
+                    pinned_idx = next((i for i, k in enumerate(fixture_names) if pinned and str(fixtures[k]['id']) == str(pinned['id'])), 0)
+                    t_key = st.selectbox("Tournament", fixture_names, index=pinned_idx)
+                    t_id, t_start = fixtures[t_key]['id'], fixtures[t_key]['start']
+            
+            
+            if t_id:
+                if pinned and str(pinned["id"]) == str(t_id):
+                    st.caption("📌 This is the active tournament.")
+                elif st.button("📌 Pin as active tournament", type="primary", use_container_width=True):
+                    if save_active_tournament(t_id, t_key, t_start):
+                        log_event("ADMIN ACTION", f"Pinned active tournament: {t_key} ({t_id})")
+                        st.session_state["picking_tournament"] = False
+                        st.rerun()
+                    else:
+                        st.error("🚨 Failed to save the active tournament. Has sql/golf_app_settings.sql been run?")
+            if pinned and st.button(f"↩️ Back to {pinned.get('name') or pinned['id']}", use_container_width=True):
+                st.session_state["picking_tournament"] = False
+                st.rerun()
             
         if t_id:
             st.session_state['current_t_id'] = t_id

@@ -1,0 +1,32 @@
+name: Field watch
+
+# Checks the pinned tournament's field and emails the admin if it changed.
+# field_watch.py does nothing (and makes no API call) unless entries close within WATCH_DAYS.
+on:
+  schedule:
+    - cron: "17 */2 * * *"   # every 2 hours, at :17 past (UTC)
+  workflow_dispatch: {}       # "Run workflow" button in the Actions tab
+
+concurrency:
+  group: field-watch
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install "supabase>=2.0,<3" "requests>=2.31,<3" "pytz>=2024.1"
+      - run: python field_watch.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          RAPIDAPI_KEYS: ${{ secrets.RAPIDAPI_KEYS }}
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
+          WATCH_DAYS: "10"
