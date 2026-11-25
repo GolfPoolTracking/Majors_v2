@@ -39,4 +39,4 @@ jobs:
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
           TEST_EMAIL: ${{ inputs.test_email && 'true' || '' }}
-          WATCH_DAYS: ${{ inputs.watch_days || '4' }}   # change the '4' to change the scheduled value
+          WATCH_DAYS: ${{ inputs.watch_days || '2' }}   # change the '2' to change the scheduled value
