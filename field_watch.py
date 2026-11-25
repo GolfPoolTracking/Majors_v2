@@ -17,6 +17,8 @@ Environment variables:
     ALERT_EMAIL                     optional; where to send the alert (default: EMAIL_SENDER)
     TOURNAMENT_ID                   optional; check this tournament instead of the pinned one
     WATCH_DAYS                      optional; only check within this many days of close (default 10)
+    TEST_EMAIL                      optional; "true" ignores the watch window, checks the API and always
+                                    emails the admin a test report (without marking a change as alerted)
 """
 import datetime
 import html
@@ -160,11 +162,26 @@ def send_email(sender, pwd, to, subject, body_html):
         server.send_message(msg)
 
 
+def build_test_email_html(t_name, t_id, status_lines, change_html):
+    items = "".join(f"<li>{html.escape(line)}</li>" for line in status_lines)
+    return ("<html><body style=\"font-family:Helvetica,Arial,sans-serif;color:#2c3e50;line-height:1.5;"
+            "max-width:600px;margin:0 auto;padding:16px;\">"
+            f"<h2 style='margin:0 0 10px 0;'>🧪 Field watch test: {html.escape(t_name)} ({html.escape(t_id)})</h2>"
+            "<p>This is a test run from the Actions tab. If you're reading this, the email settings work.</p>"
+            f"<ul>{items}</ul>"
+            + (f"<hr><p><b>This is the alert a scheduled run would send now:</b></p>{change_html}" if change_html else "")
+            + "<p>Test runs ignore the watch window and don't mark a change as already alerted.</p>"
+            "</body></html>")
+
+
 def main():
     from supabase import create_client
 
     sb = create_client(env("SUPABASE_URL"), env("SUPABASE_KEY"))
     watch_days = int(env("WATCH_DAYS", required=False, default="10"))
+    test_mode = env("TEST_EMAIL", required=False, default="").lower() in ("1", "true", "yes")
+    if test_mode:
+        print("🧪 Test run: ignoring the watch window and sending a test email.")
 
     def app_setting(key):
         res = sb.table("golf_app_settings").select("value").eq("key", key).execute()
@@ -179,7 +196,9 @@ def main():
     pinned = app_setting("active_tournament") or {}
     t_id = env("TOURNAMENT_ID", required=False) or pinned.get("id")
     if not t_id:
-        print("No active tournament pinned (admin page → 📌 Pin as active tournament). Nothing to do.")
+        msg = "No active tournament pinned (admin page → 📌 Pin as active tournament). Nothing to do."
+        if test_mode: sys.exit(msg)  # fail the test run so it shows up red
+        print(msg)
         return
     t_id = str(t_id)
 
@@ -192,41 +211,61 @@ def main():
     close_uk = resolve_close_time(cfg.get("close_time"), start)
     now_uk = datetime.datetime.now(UK_TZ)
     ok, reason = should_check(now_uk, close_uk, watch_days)
-    if not ok:
+    status = [f"Entries close: {format_close(close_uk)}" if close_uk else "Entries close: unknown",
+              f"Watch window ({watch_days} days): " + ("open, scheduled runs are checking" if ok else f"closed, {reason}")]
+    if not ok and not test_mode:
         print(f"{t_name} ({t_id}): skipping, {reason}.")
         return
 
+    sender, pwd = env("EMAIL_SENDER"), env("EMAIL_PASSWORD")
+    to = env("ALERT_EMAIL", required=False, default=sender)
+
+    def finish_test(extra, change_html=""):
+        status.extend(extra)
+        send_email(sender, pwd, to, f"🧪 Field watch test: {t_name}",
+                   build_test_email_html(t_name, t_id, status, change_html))
+        print("\n".join(status))
+        print(f"Test email sent to {to}.")
+
     baseline = parse_field(cfg.get("alerted_field"))
-    if not baseline:
+    if not baseline and not test_mode:
         print(f"{t_name} ({t_id}): no alert baseline yet. Set it in the admin Field tab first.")
         return
 
     current = fetch_entry_list(t_id, [k.strip() for k in env("RAPIDAPI_KEYS").split(",") if k.strip()])
     if not current:
+        if test_mode: return finish_test(["RapidAPI: reached, but the field came back empty"])
         print(f"{t_name} ({t_id}): API returned an empty field; treating as a glitch and skipping.")
         return
+    if not baseline:
+        return finish_test([f"RapidAPI: OK, {len(current)} players in the field",
+                            "Alert baseline: not set yet. Press 'Set Initial Baseline' in the admin Field tab."])
 
     added, removed = diff_field(baseline, current)
     if not added and not removed:
+        if test_mode: return finish_test([f"RapidAPI: OK, {len(current)} players in the field",
+                                          "Field: stable, matches your baseline"])
         print(f"{t_name} ({t_id}): field stable ({len(current)} players).")
         return
 
     sig = change_signature(added, removed)
     state_key = f"field_watch_last_alert_{t_id}"
-    if app_setting(state_key) == sig:
+    if not test_mode and app_setting(state_key) == sig:
         print(f"{t_name} ({t_id}): unchanged since last alert (+{len(added)}/-{len(removed)}); not re-sending.")
         return
 
     entries = sb.table("golf_tournament_standings").select(
         "participant_name, email, picks").eq("tournament_id", t_id).execute().data or []
     affected = affected_entries(entries, removed)
+    alert_html = build_email_html(t_name, added, removed, affected, close_uk, len(baseline), len(current))
 
-    sender, pwd = env("EMAIL_SENDER"), env("EMAIL_PASSWORD")
-    to = env("ALERT_EMAIL", required=False, default=sender)
+    if test_mode:
+        return finish_test([f"RapidAPI: OK, {len(current)} players in the field",
+                            f"Field: changed since your baseline (+{len(added)} / −{len(removed)})"], alert_html)
+
     subject = f"⛳ Field change: {t_name} (+{len(added)} / −{len(removed)}"
     subject += f", {len(affected)} entries affected)" if affected else ")"
-    send_email(sender, pwd, to, subject,
-               build_email_html(t_name, added, removed, affected, close_uk, len(baseline), len(current)))
+    send_email(sender, pwd, to, subject, alert_html)
     set_app_setting(state_key, sig)
     sb.table("golf_app_logs").insert({
         "tournament_id": t_id, "event_type": "FIELD WATCH",

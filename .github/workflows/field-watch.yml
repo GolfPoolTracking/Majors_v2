@@ -5,7 +5,16 @@ name: Field watch
 on:
   schedule:
     - cron: "17 3,12,17,22 * * *" 
-  workflow_dispatch: {}       # "Run workflow" button in the Actions tab
+  workflow_dispatch:           # "Run workflow" button in the Actions tab
+    inputs:
+      test_email:
+        description: "Send me a test email (checks the API and email now, even outside the watch window)"
+        type: boolean
+        default: false
+      watch_days:
+        description: "WATCH_DAYS for this run only (leave blank to use the value in this file)"
+        type: string
+        default: ""
 
 concurrency:
   group: field-watch
@@ -29,4 +38,5 @@ jobs:
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
-          WATCH_DAYS: "4"
+          TEST_EMAIL: ${{ inputs.test_email && 'true' || '' }}
+          WATCH_DAYS: ${{ inputs.watch_days || '4' }}   # change the '4' to change the scheduled value

@@ -41,7 +41,10 @@ Supabase SQL editor to recreate that object.
 `.github/workflows/field-watch.yml` runs `field_watch.py` every 2 hours. Within 10 days of the
 entry close it compares the pinned tournament's field with the Field tab's alert baseline and
 emails the admin once per change. It never emails entrants; that's still the **🚀 Send Alert
-Emails** button. Run it by hand from the Actions tab (**Field watch → Run workflow**).
+Emails** button. Run it by hand from the Actions tab (**Field watch → Run workflow**). Tick
+**Send me a test email** to check the API keys and email settings at any time: it ignores the
+watch window and emails a status report. **WATCH_DAYS for this run only** overrides the window
+for that one run.
 
 It needs these repository secrets (Settings → Secrets and variables → Actions):
 `SUPABASE_URL`, `SUPABASE_KEY`, `RAPIDAPI_KEYS` (comma-separated), `EMAIL_SENDER`,
