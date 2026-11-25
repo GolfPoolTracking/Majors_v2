@@ -5,3 +5,4 @@ pytz>=2024.1
 supabase>=2.0,<3
 altair>=5.0,<7
 sentry-sdk>=2.0,<3
+markdown>=3.5,<4

@@ -9,6 +9,9 @@ import streamlit as st
 from auth import make_magic_link_hash, secure_equals
 from db import (
     insert_entry,
+    add_subscriber,
+    get_subscriber_by_token,
+    set_subscribed,
     fetch_active_tournament,
     fetch_alerted_field_from_db,
     fetch_aliases_from_db,
@@ -51,6 +54,7 @@ from golf_api import (
     get_settings_cache,
     get_top_20_players,
 )
+from admin_mailing import render_mailing_tab
 from leaderboard import calculate_leaderboard, get_clean_entries, render_pga_leaderboard
 from scoring import check_api_par_warning, get_calculated_par, get_dropdown_index, safe_int
 
@@ -78,6 +82,54 @@ if st.query_params.get("view") == "ping":
         st.write("Supabase is awake! 🐘🟢")
     except Exception as e:
         st.write(f"Supabase ping error: {e}")
+    st.stop()
+
+# 📬 MAILING LIST PAGES (unsubscribe link in emails, and the signup link to share)
+if st.query_params.get("view") == "unsubscribe":
+    st.markdown("## 📬 Golf Sweepstakes emails")
+    sub = get_subscriber_by_token(st.query_params.get("token", ""))
+    if not sub:
+        st.error("This unsubscribe link isn't valid. Reply to any sweepstakes email and we'll take you off the list.")
+    elif st.session_state.get("resub_done") == sub["email"]:
+        st.success(f"✅ You're back on the list. **{html.escape(sub['email'])}** will get sweepstakes emails again.")
+    elif st.session_state.get("unsub_done") == sub["email"] or sub.get("unsubscribed_at"):
+        st.success(f"You're unsubscribed. **{html.escape(sub['email'])}** won't get any more sweepstakes emails.")
+        if st.button("Changed your mind? Resubscribe"):
+            if set_subscribed(sub["email"], True):
+                st.session_state["resub_done"] = sub["email"]
+                st.rerun()
+    else:
+        st.write(f"Stop sending sweepstakes emails to **{html.escape(sub['email'])}**?")
+        st.caption("You'll still get emails about any team you've entered, like confirmations and withdrawal alerts.")
+        if st.button("Unsubscribe", type="primary"):
+            if set_subscribed(sub["email"], False):
+                st.session_state["unsub_done"] = sub["email"]
+                st.rerun()
+            else:
+                st.error("🚨 Something went wrong. Please try again.")
+    st.stop()
+
+if st.query_params.get("view") == "signup":
+    st.markdown("## ⛳ Golf Sweepstakes")
+    st.write("Get an email when entries open for each major, plus a reminder before they close.")
+    if st.session_state.get("signup_done"):
+        st.success("✅ You're on the list. Look out for an email when entries open for the next major.")
+        st.stop()
+    with st.form("signup_form"):
+        s1, s2 = st.columns(2)
+        with s1: su_first = st.text_input("First name *")
+        with s2: su_last = st.text_input("Last name")
+        su_email = st.text_input("Email *")
+        su_ref = st.text_input("Who referred you?")
+        if st.form_submit_button("Sign me up", type="primary"):
+            if not su_first.strip() or not re.match(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$", su_email.strip()):
+                st.error("🚨 Please enter your first name and a valid email address.")
+            elif add_subscriber(su_email, su_first, su_last, source="Signup page", referred_by=su_ref, resubscribe=True) == "error":
+                st.error("🚨 Something went wrong. Please try again.")
+            else:
+                st.session_state["signup_done"] = True
+                st.rerun()
+    st.caption("You can unsubscribe at any time from the link at the bottom of every email.")
     st.stop()
 
 # 🚨 DYNAMIC THEME CSS (FOR DARK MODE SUPPORT) 🚨
@@ -411,6 +463,8 @@ if is_public:
                     with col4: 
                         form_payment = st.selectbox("Payment Method *", pay_opts)
                     
+                    form_optin = st.checkbox("📬 Email me when entries open for future majors", value=True)
+                    
                     submitted = st.form_submit_button("Submit Team", type="primary")
                     
                     if submitted:
@@ -441,6 +495,9 @@ if is_public:
                             with st.spinner("Locking in your team..."):
                                 if insert_entry(tid, [ts, form_name, form_email, final_payment, form_tie, p1, p2, p3, p4, p5]):
                                     log_event("NEW ENTRY", f"Team submitted by {form_name}")
+                                    if form_optin:
+                                        name_parts = form_name.strip().split(" ", 1)
+                                        add_subscriber(form_email, name_parts[0], name_parts[1] if len(name_parts) > 1 else "", source="Entry form")
                                     send_confirmation_email(form_email, form_name, clean_picks, form_tie, final_payment, tnm, tid, is_edit=False, close_time_str=close_time_str_email, logo_url=public_logo)
                                     st.session_state[f"success_{tid}"] = True
                                     st.session_state[f"success_email_{tid}"] = form_email
@@ -957,7 +1014,7 @@ else:
         if not logo_rendered:
             st.markdown(f"<h1 style='text-align: center; padding-bottom: 10px;'>🏆 {html.escape(t_name_display)}</h1>", unsafe_allow_html=True)
 
-        t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11 = st.tabs(["🏆 Leaderboard", "📝 Entries", "💵 Financials", "⛳ Official PGA Scores", "💾 Export", "📡 API Status", "💻 Raw JSON", "📜 Rules", "🏌️ Field", "📈 Analytics", "🔀 Aliases"])
+        t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12 = st.tabs(["🏆 Leaderboard", "📝 Entries", "💵 Financials", "⛳ Official PGA Scores", "💾 Export", "📡 API Status", "💻 Raw JSON", "📜 Rules", "🏌️ Field", "📈 Analytics", "🔀 Aliases", "📣 Mailing List"])
         
         lb_data, next_f, last_f, full_data, data_source = fetch_smart_leaderboard(t_id)
         
@@ -1362,3 +1419,8 @@ else:
                         else: st.error("🚨 Failed to save alias.")
                 else:
                     st.error("🚨 Please fill out both names.")
+
+        with t12:
+            st.subheader("📣 Mailing List")
+            render_mailing_tab(t_id, t_name_display, t_start, admin_logo,
+                               fetch_short_url_from_db(t_id) or f"{BASE_URL}?view=public&tourney_id={t_id}")
