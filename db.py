@@ -306,3 +306,79 @@ def update_paid_status(t_id, row_index, is_paid):
     except Exception as e: 
         print(f"DB Error (update_paid_status): {e}")
         return False
+
+
+# --- Mailing list (golf_subscribers) ---
+
+def _now_iso():
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+def get_subscribers_df():
+    try:
+        res = get_supabase().table('golf_subscribers').select(
+            'email, first_name, last_name, referred_by, source, subscribed_at, unsubscribed_at').order('email').execute()
+        return pd.DataFrame(res.data or [])
+    except Exception as e:
+        print(f"DB Read Error (subscribers): {e}")
+        return pd.DataFrame()
+
+def get_subscriber(email):
+    try:
+        res = get_supabase().table('golf_subscribers').select('*').eq('email', email.strip().lower()).execute()
+        return res.data[0] if res.data else None
+    except Exception as e:
+        print(f"DB Read Error (subscriber): {e}")
+        return None
+
+def get_subscriber_by_token(token):
+    try:
+        res = get_supabase().table('golf_subscribers').select('*').eq('unsub_token', str(token)).execute()
+        return res.data[0] if res.data else None
+    except Exception as e:  # a malformed token isn't a valid uuid
+        print(f"DB Read Error (subscriber by token): {e}")
+        return None
+
+def add_subscriber(email, first_name="", last_name="", source="", referred_by="", resubscribe=False):
+    """Adds a new subscriber. An existing one is left as is, unless resubscribe=True and they
+    had unsubscribed (only for an explicit sign-up, never a pre-ticked box).
+    Returns 'added', 'resubscribed', 'exists' or 'error'."""
+    email = email.strip().lower()
+    try:
+        existing = get_subscriber(email)
+        sb = get_supabase().table('golf_subscribers')
+        if existing is None:
+            sb.insert({'email': email, 'first_name': first_name.strip() or None, 'last_name': last_name.strip() or None,
+                       'source': source or None, 'referred_by': referred_by.strip() or None}).execute()
+            return 'added'
+        if resubscribe and existing.get('unsubscribed_at'):
+            sb.update({'unsubscribed_at': None, 'subscribed_at': _now_iso()}).eq('email', email).execute()
+            return 'resubscribed'
+        return 'exists'
+    except Exception as e:
+        print(f"DB Write Error (add subscriber): {e}")
+        return 'error'
+
+def set_subscribed(email, subscribed):
+    try:
+        get_supabase().table('golf_subscribers').update(
+            {'unsubscribed_at': None if subscribed else _now_iso()}).eq('email', email.strip().lower()).execute()
+        return True
+    except Exception as e:
+        print(f"DB Write Error (set subscribed): {e}")
+        return False
+
+def get_entered_emails(t_id):
+    try:
+        res = get_supabase().table('golf_entries').select('email').eq('tournament_id', str(t_id)).execute()
+        return {str(r.get('email') or '').strip().lower() for r in (res.data or [])}
+    except Exception as e:
+        print(f"DB Read Error (entered emails): {e}")
+        return set()
+
+def get_campaign_sent_emails(campaign_id):
+    try:
+        res = get_supabase().table('golf_email_sends').select('email').eq('campaign_id', campaign_id).eq('status', 'sent').execute()
+        return {r['email'] for r in (res.data or [])}
+    except Exception as e:
+        print(f"DB Read Error (campaign sends): {e}")
+        return set()

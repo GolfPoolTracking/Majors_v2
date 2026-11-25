@@ -14,6 +14,9 @@ scores count each round, and the leaderboard updates from live tournament data.
 | `db.py` | Supabase reads and writes (tournament settings, entries, logs) |
 | `emails.py` | Confirmation, edit-link and field-change emails |
 | `auth.py` | Signing and checking the secure edit links |
+| `campaigns.py` | Mailing-list email templates ("entries open", "closing soon") and the Gmail sender |
+| `admin_mailing.py` | The admin 📣 Mailing List tab: subscribers, preview, test send, queue a send |
+| `send_campaign.py` | Sends a queued mailing-list email (GitHub Actions) |
 | `field_watch.py` | Scheduled field check (GitHub Actions): emails the admin when the pinned tournament's field changes before entries close |
 
 ## Tests
@@ -33,6 +36,7 @@ Supabase SQL editor to recreate that object.
 
 | File | What it is |
 |---|---|
+| `sql/golf_subscribers.sql` | Mailing list (`golf_subscribers`) and the per-email send log (`golf_email_sends`) |
 | `sql/golf_app_settings.sql` | App-wide settings table. Holds the pinned active tournament the admin page opens on. |
 | `sql/golf_tournament_standings_view.sql` | The view the app reads entries from. It must be a view over `golf_entries`, not a table copy, or new entries won't show. |
 
@@ -49,3 +53,19 @@ for that one run.
 It needs these repository secrets (Settings → Secrets and variables → Actions):
 `SUPABASE_URL`, `SUPABASE_KEY`, `RAPIDAPI_KEYS` (comma-separated), `EMAIL_SENDER`,
 `EMAIL_PASSWORD`, and optionally `ALERT_EMAIL` (defaults to `EMAIL_SENDER`).
+
+## Mailing list
+
+Replaces Mailchimp. Subscribers live in `golf_subscribers`; people join from the signup page
+(`?view=signup`) or by leaving "Email me when entries open" ticked on the entry form, and leave
+from the unsubscribe link in every email (`?view=unsubscribe&token=…`).
+
+Send from the admin **📣 Mailing List** tab: pick "Entries open" or "Closing soon reminder", edit the
+subject and opening message, preview, **Send a test to me**, then **Send to N subscribers**. That
+queues the email and starts `.github/workflows/send-emails.yml`, which sends one email per person
+(about 2 seconds apart), logs each one in `golf_email_sends` so nobody is emailed twice for the same
+tournament and kind, and emails the admin a summary. "Closing soon" skips anyone who has entered.
+
+To let the admin page start the workflow, add a `github_token` Streamlit secret: a fine-grained
+GitHub token for this repository with **Actions: Read and write**. Without it, the email is queued
+and you press **Actions → Send emails → Run workflow** yourself.
